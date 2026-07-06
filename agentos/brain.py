@@ -36,7 +36,11 @@ SYSTEM_HINT = (
     "- run_command(command): run any bash command in the sandbox and get its "
     "output. You have passwordless sudo, so you can install packages "
     "('sudo apt-get install -y <pkg>'), download files, and inspect or fix "
-    "anything without the GUI.\n"
+    "anything without the GUI. This returns text only and does NOT take a "
+    "screenshot — chain several shell commands cheaply this way. When you "
+    "actually need to see the screen, call take_screenshot (or pass "
+    "screenshot=true to run_command); don't waste actions screenshotting "
+    "after pure shell work.\n"
     "- open_app(command): launch a GUI program detached, e.g. "
     "open_app(command='firefox-esr') or open_app(command='xterm').\n"
     "Firefox ESR is installed and usually already open; if the screen looks "
@@ -54,14 +58,19 @@ _CUSTOM_TOOLS = [
             "Run a bash command inside the sandbox and return its exit code and "
             "combined stdout/stderr. Passwordless sudo is available. Use this for "
             "installing packages, downloading files, reading/writing files, and "
-            "anything faster done in a shell than by clicking. Do not start GUI "
-            "programs with this (they block); use open_app for those."
+            "anything faster done in a shell than by clicking. Returns text only "
+            "and takes NO screenshot by default (that keeps shell work fast) — "
+            "set screenshot=true only if the command changes what's on screen "
+            "and you need to see the result. Do not start GUI programs with this "
+            "(they block); use open_app for those."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "command": {"type": "string", "description": "The bash command to run."},
                 "intent": {"type": "string", "description": "One line: why you are running it."},
+                "screenshot": {"type": "boolean", "description":
+                    "Set true only if you need to see the screen after this command. Default false."},
             },
             "required": ["command"],
         },
@@ -203,6 +212,18 @@ class GeminiBrain:
                     raise
         raise last_error  # type: ignore[misc]
 
+    # Actions whose feedback is text, not pixels — no screenshot unless asked.
+    _TEXT_ONLY_ACTIONS = {"run_command"}
+
+    @classmethod
+    def _wants_screenshot(cls, name: str, args: dict) -> bool:
+        """A GUI action needs a screenshot to show its effect; a shell command
+        does not. `take_screenshot`/`wait`/`open_app` stay visual. The model
+        can force one after a shell command with screenshot=true."""
+        if name in cls._TEXT_ONLY_ACTIONS:
+            return bool(args.get("screenshot"))
+        return True
+
     @staticmethod
     def _drain_guidance(task: Task, contents: list[types.Content],
                         log: RunLog, step: int) -> None:
@@ -270,18 +291,23 @@ class GeminiBrain:
                               exit_code=payload.get("exit_code"),
                               output=payload["output"][:1000])
 
-                png = await self._settled_screenshot(sandbox)
-                path = log.save_screenshot(step, png)
-                log.event(step, "screenshot", path=path)
+                # A screenshot is the feedback for GUI actions, but pure noise
+                # (and a ~1s settle wait) after a shell command whose answer is
+                # text. Only capture one when the action is visual, or the model
+                # explicitly asked for it.
+                fr_parts = None
+                if self._wants_screenshot(fc.name, args):
+                    png = await self._settled_screenshot(sandbox)
+                    path = log.save_screenshot(step, png)
+                    log.event(step, "screenshot", path=path)
+                    fr_parts = [types.FunctionResponsePart(
+                        inline_data=types.FunctionResponseBlob(
+                            mime_type="image/png", data=png,
+                        )
+                    )]
                 response_parts.append(types.Part(
                     function_response=types.FunctionResponse(
-                        name=fc.name,
-                        response=payload,
-                        parts=[types.FunctionResponsePart(
-                            inline_data=types.FunctionResponseBlob(
-                                mime_type="image/png", data=png,
-                            )
-                        )],
+                        name=fc.name, response=payload, parts=fr_parts,
                     )
                 ))
 
