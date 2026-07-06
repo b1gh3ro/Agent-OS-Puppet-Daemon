@@ -31,6 +31,7 @@ class Sandbox(Protocol):
     async def mouse_button(self, x: int, y: int, down: bool, button: int = 1) -> None: ...
     async def key_state(self, key: str, down: bool) -> None: ...
     async def launch(self, command: str) -> None: ...
+    async def exec_shell(self, command: str, timeout: float = 60.0) -> tuple[int, str]: ...
 
 
 class DockerSandbox:
@@ -100,6 +101,25 @@ class DockerSandbox:
     async def launch(self, command: str) -> None:
         """Start a GUI app detached inside the container (e.g. firefox-esr)."""
         await self._exec("bash", "-c", f"nohup {shlex.quote(command)} >/dev/null 2>&1 & disown")
+
+    async def exec_shell(self, command: str, timeout: float = 60.0) -> tuple[int, str]:
+        """Run a shell command in the container and return (exit_code, output).
+
+        Unlike _exec this never raises on a nonzero exit — the code and the
+        combined stdout/stderr go back to the caller (ultimately the model),
+        which can read the error and adapt.
+        """
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "exec", self.container, "bash", "-lc", command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout)
+        except TimeoutError:
+            proc.kill()
+            return 124, f"(command still running after {timeout:.0f}s and was killed; use open_app for GUI programs)"
+        return proc.returncode or 0, stdout.decode(errors="replace")
 
 
 async def ensure_container(

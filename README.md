@@ -45,22 +45,24 @@ Leave this terminal open — it's the agent's brain stem and prints a log line f
 agentos daemon in auto mode on http://127.0.0.1:8420
 ```
 
-**Step 5 — watch its screen.** In your normal Windows browser, open:
+**Step 5 — open the dashboard.** In your normal Windows browser, open:
 
 ```
-http://localhost:6080/vnc.html
+http://localhost:8420
 ```
 
-and click **Connect** (no password). This is the agent's desktop, live.
+This is mission control: submit tasks, watch the live activity feed, see the
+agent's latest screenshot, and open the **Live desktop** tab (the embedded
+noVNC view of the sandbox — also available raw at `http://localhost:6080/vnc.html`).
 
-**Step 6 — give it a job.** In a second terminal:
+**Step 6 — give it a job.** Type a goal into the dashboard and hit **Run**, or from a second terminal:
 
 ```bash
 curl -X POST localhost:8420/tasks -H 'Content-Type: application/json' \
   -d '{"goal": "Go to en.wikipedia.org, search for Alan Turing, and report his date of birth.", "max_steps": 25}'
 ```
 
-You get back an `id`. Now watch the browser tab from step 5 — the mouse will start moving on its own. Check the answer with:
+You get back an `id`. Now watch the Live desktop tab — the mouse will start moving on its own. Check the answer with:
 
 ```bash
 curl localhost:8420/tasks/PUT-THE-ID-HERE
@@ -68,12 +70,30 @@ curl localhost:8420/tasks/PUT-THE-ID-HERE
 
 When `status` is `done`, the `result` field is the agent's answer.
 
+**Steering a running task.** If the agent is going down the wrong path, you
+don't have to kill it. From the dashboard: hit **Pause** (it freezes at its
+next step), type a hint into the steer box, then **Resume** — or just send the
+hint without pausing and it's injected before the agent's next move. Same
+thing over HTTP:
+
+```bash
+curl -X POST localhost:8420/tasks/<id>/pause
+curl -X POST localhost:8420/tasks/<id>/guidance -H 'Content-Type: application/json' \
+  -d '{"text": "The first result is an ad — use the second link instead."}'
+curl -X POST localhost:8420/tasks/<id>/resume
+```
+
+Note: the wall-clock timeout keeps ticking while paused.
+
 ## Everyday commands
 
 ```bash
 curl localhost:8420/health                        # is it alive?
 curl localhost:8420/tasks                         # all tasks this session
 curl -X POST localhost:8420/tasks/<id>/cancel     # stop a runaway task
+curl -X POST localhost:8420/tasks/<id>/pause      # freeze at the next step
+curl -X POST localhost:8420/tasks/<id>/resume     # let it continue
+curl "localhost:8420/tasks/<id>/steps?after=0"    # the step feed as JSON
 cat runs/<id>/steps.jsonl                         # replay every action it took
 .venv-wsl/bin/python -m pytest tests/ -q          # run the tests
 ```

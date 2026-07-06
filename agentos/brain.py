@@ -29,13 +29,60 @@ MODEL_CANDIDATES = [
 MAX_SCREENSHOTS_IN_HISTORY = 3
 
 SYSTEM_HINT = (
-    "You are operating a Linux desktop ({w}x{h}) inside a sandbox. "
-    "Firefox ESR is installed (a browser may need to be opened first). "
-    "You have full control: a terminal (xterm) is available, and you have "
-    "passwordless sudo, so you can download files or install packages "
-    "(e.g. 'sudo apt-get install -y <pkg>') whenever the task needs it. "
-    "Complete this task, then answer in plain text with the outcome:\n\n{goal}"
+    "You are operating a Linux desktop ({w}x{h}) inside a sandbox running the "
+    "openbox window manager (no taskbar, no app launcher, no Ubuntu/GNOME "
+    "keyboard shortcuts; right-clicking the desktop opens a small menu). "
+    "Besides the GUI actions you have two extra tools — use them freely:\n"
+    "- run_command(command): run any bash command in the sandbox and get its "
+    "output. You have passwordless sudo, so you can install packages "
+    "('sudo apt-get install -y <pkg>'), download files, and inspect or fix "
+    "anything without the GUI.\n"
+    "- open_app(command): launch a GUI program detached, e.g. "
+    "open_app(command='firefox-esr') or open_app(command='xterm').\n"
+    "Firefox ESR is installed and usually already open; if the screen looks "
+    "empty, call open_app(command='firefox-esr') instead of hunting for a "
+    "launcher. Complete this task, then answer in plain text with the "
+    "outcome:\n\n{goal}"
 )
+
+_CUSTOM_TOOLS = [
+    {
+        "name": "run_command",
+        "description": (
+            "Run a bash command inside the sandbox and return its exit code and "
+            "combined stdout/stderr. Passwordless sudo is available. Use this for "
+            "installing packages, downloading files, reading/writing files, and "
+            "anything faster done in a shell than by clicking. Do not start GUI "
+            "programs with this (they block); use open_app for those."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "The bash command to run."},
+                "intent": {"type": "string", "description": "One line: why you are running it."},
+            },
+            "required": ["command"],
+        },
+    },
+    {
+        "name": "open_app",
+        "description": (
+            "Launch a GUI application on the desktop, detached, e.g. "
+            "'firefox-esr' or 'xterm'. Returns immediately; a screenshot "
+            "follows so you can see the app once it is up."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "The program (and args) to launch."},
+                "intent": {"type": "string", "description": "One line: why you are launching it."},
+            },
+            "required": ["command"],
+        },
+    },
+]
+
+RUN_COMMAND_OUTPUT_LIMIT = 4000
 
 # Model key names -> xdotool keysym names (pass-through when unmapped).
 _KEYMAP = {
@@ -54,6 +101,29 @@ def _to_xdotool_combo(keys: str | list[str]) -> str:
     return "+".join(_KEYMAP.get(p.strip().lower(), p.strip()) for p in parts if p.strip())
 
 
+async def pause_gate(task: Task, log: RunLog, step: int) -> None:
+    """Per-step control gate: honor cancel, then block while pause is requested.
+
+    Pause is cooperative — it only takes effect at step boundaries, and the
+    wait still burns the task's wall-clock timeout (asyncio.wait_for's
+    deadline in the daemon cannot be extended mid-flight).
+    """
+    if task.cancel_requested:
+        raise TaskCancelled()
+    if not task.pause_requested:
+        return
+    task.paused = True
+    log.event(step, "paused")
+    try:
+        while task.pause_requested:
+            if task.cancel_requested:
+                raise TaskCancelled()
+            await asyncio.sleep(0.25)
+    finally:
+        task.paused = False
+    log.event(step, "resumed")
+
+
 class StubBrain:
     """Screenshot-only brain for smoke-testing the daemon without an API key."""
 
@@ -62,8 +132,11 @@ class StubBrain:
 
     async def run_task(self, task: Task, sandbox: Sandbox, log: RunLog) -> str:
         for step in range(1, self.steps + 1):
-            if task.cancel_requested:
-                raise TaskCancelled()
+            await pause_gate(task, log, step)
+            if task.guidance:  # no model to steer; just log and clear
+                for text in task.guidance:
+                    log.event(step, "guidance", text=text)
+                task.guidance.clear()
             png = await sandbox.screenshot()
             path = log.save_screenshot(step, png)
             log.event(step, "screenshot", path=path, bytes=len(png))
@@ -87,10 +160,13 @@ class GeminiBrain:
 
     def _config(self) -> types.GenerateContentConfig:
         return types.GenerateContentConfig(
-            tools=[types.Tool(computer_use=types.ComputerUse(
-                environment=self._environment,
-                enable_prompt_injection_detection=True,
-            ))],
+            tools=[
+                types.Tool(computer_use=types.ComputerUse(
+                    environment=self._environment,
+                    enable_prompt_injection_detection=True,
+                )),
+                types.Tool(function_declarations=_CUSTOM_TOOLS),
+            ],
         )
 
     async def _generate(self, contents):
@@ -110,6 +186,21 @@ class GeminiBrain:
                     raise
         raise last_error  # type: ignore[misc]
 
+    @staticmethod
+    def _drain_guidance(task: Task, contents: list[types.Content],
+                        log: RunLog, step: int) -> None:
+        """Inject pending operator guidance as a user turn before the next call."""
+        if not task.guidance:
+            return
+        notes = list(task.guidance)
+        task.guidance.clear()
+        for text in notes:
+            log.event(step, "guidance", text=text)
+        contents.append(types.Content(role="user", parts=[types.Part(text=(
+            "Operator guidance (incorporate into your next actions):\n"
+            + "\n".join(notes)
+        ))]))
+
     async def run_task(self, task: Task, sandbox: Sandbox, log: RunLog) -> str:
         png = await self._settled_screenshot(sandbox, delay=0)
         log.save_screenshot(0, png)
@@ -121,8 +212,8 @@ class GeminiBrain:
         ]
 
         for step in range(1, task.max_steps + 1):
-            if task.cancel_requested:
-                raise TaskCancelled()
+            await pause_gate(task, log, step)
+            self._drain_guidance(task, contents, log, step)
             task.steps_taken = step
 
             response = await self._generate(contents)
@@ -141,8 +232,7 @@ class GeminiBrain:
                 log.event(step, "action", name=fc.name, args=args)
                 acknowledged = self._auto_acknowledge_safety(args, log, step)
                 try:
-                    await self._execute(fc.name, args, sandbox)
-                    payload: dict = {}
+                    payload: dict = await self._execute(fc.name, args, sandbox) or {}
                 except Exception as e:
                     payload = {"error": str(e)}
                     log.event(step, "action_error", name=fc.name, error=str(e))
@@ -191,10 +281,12 @@ class GeminiBrain:
             return True
         return False
 
-    async def _execute(self, name: str, args: dict, sandbox: Sandbox) -> None:
-        """Dispatch a model action. Covers both the current gemini-3.5 action
-        names (click, hotkey, wait, ...) and the legacy computer-use-preview
-        vocabulary (click_at, key_combination, ...)."""
+    async def _execute(self, name: str, args: dict, sandbox: Sandbox) -> dict | None:
+        """Dispatch a model action; a returned dict goes back to the model in
+        the function response. Covers both the current gemini-3.5 action
+        names (click, hotkey, wait, ...), the legacy computer-use-preview
+        vocabulary (click_at, key_combination, ...), and our custom tools
+        (run_command, open_app)."""
         w, h = sandbox.width, sandbox.height
 
         def point(kx: str = "x", ky: str = "y", default_center: bool = False) -> tuple[int, int]:
@@ -203,6 +295,14 @@ class GeminiBrain:
             return denormalize(args[kx], args[ky], w, h)
 
         match name:
+            case "run_command":
+                code, output = await sandbox.exec_shell(str(args.get("command", "")))
+                if len(output) > RUN_COMMAND_OUTPUT_LIMIT:
+                    output = output[:RUN_COMMAND_OUTPUT_LIMIT] + "\n…(output truncated)"
+                return {"exit_code": code, "output": output}
+            case "open_app":
+                await sandbox.launch(str(args.get("command", "")))
+                await asyncio.sleep(3)
             case "open_web_browser":
                 await sandbox.launch("firefox-esr")
                 await asyncio.sleep(6)

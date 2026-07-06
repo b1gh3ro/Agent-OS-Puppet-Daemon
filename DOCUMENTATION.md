@@ -74,7 +74,7 @@ Dependencies (requirements.txt): `aiohttp` (HTTP server), `google-genai` (Gemini
 
 You'll see: `agentos daemon in auto mode on http://127.0.0.1:8420 (sandbox: agent-sandbox, brain: GeminiBrain)`. Ctrl+C stops it. "Auto mode" means tasks execute end-to-end with no per-action confirmation — the safety rails are what keep that sane.
 
-**Watch it live**: open **http://localhost:6080/vnc.html** in your Windows browser and click Connect (no password). You'll see the agent's desktop in real time — mouse moving, pages loading.
+**The dashboard**: open **http://localhost:8420** in your Windows browser. It's a single-page mission control served by the daemon itself: submit tasks, watch the live activity feed (every action with the model's stated intent), pause/steer/cancel running tasks, see the latest screenshot, and view the live desktop in an embedded noVNC frame. The raw noVNC view is still at **http://localhost:6080/vnc.html** (click Connect, no password).
 
 **Submit a task:**
 
@@ -91,7 +91,15 @@ curl -X POST localhost:8420/tasks -H 'Content-Type: application/json' \
 | `GET /tasks/<id>` | Status, steps taken, and `result` when done. |
 | `GET /tasks` | All tasks this daemon has seen since it started. |
 | `POST /tasks/<id>/cancel` | Kill switch — checked between every step. |
+| `POST /tasks/<id>/pause` | Freeze the agent at its next step boundary. 409 if the task already finished. |
+| `POST /tasks/<id>/resume` | Clear the pause; the agent continues (pending guidance is injected first). |
+| `POST /tasks/<id>/guidance` | Body: `{"text": "..."}`. Queue a steering message — injected into the model's conversation as a user turn before its next step. Works paused or mid-flight. |
+| `GET /tasks/<id>/steps?after=N` | The run's step events as JSON (parsed from `steps.jsonl`), skipping the first `N` lines. Returns `{"events": [...], "next": M}` — pass `M` back as `after` to poll incrementally. |
+| `GET /runs/<id>/step_NNN.png` | A run's screenshots (whitelisted filenames only). |
+| `GET /` | The dashboard (single static page, no build step). |
 | `GET /health` | Queue depth, task count, which brain is loaded. |
+
+**Pause semantics worth knowing:** pause is cooperative — it takes effect at the next step boundary, never mid-action or mid-model-call, and `paused` in `GET /tasks/<id>` tells you when the freeze has actually happened (vs `pause_requested`, which is just your intent). The wall-clock `timeout_seconds` keeps ticking while paused (see §6). Cancelling a paused task works. Guidance sent while the model call is already in flight lands on the step after.
 
 **Useful daemon flags:** `--brain stub` (test the whole pipeline without API calls — the stub just takes screenshots), `--port`, `--container`, `--no-container-autostart`.
 
@@ -119,11 +127,13 @@ agentos/                 the Python package (the daemon side)
   sandbox.py             Sandbox protocol + DockerSandbox (docker exec)
   scaling.py             0–1000 grid → pixel coordinate math
   logs.py                per-run JSONL + screenshot evidence trail
+  static/index.html      the dashboard — one self-contained page, no build step
 sandbox/                 the Docker image (the desktop side)
   Dockerfile             Debian + Xvfb/openbox/xdotool/scrot/Firefox/noVNC
   entrypoint.sh          boots the virtual desktop
   policies.json          kills Firefox's first-run wizard & telemetry
 tests/test_scaling.py    unit tests for the coordinate math
+tests/test_daemon_api.py pause/steer/cancel + steps-feed API tests (no Docker/Gemini)
 runs/<task-id>/          created at runtime: steps.jsonl + step screenshots
 ```
 
@@ -147,9 +157,14 @@ class Task:
     max_steps: int = 40
     timeout_seconds: float = 600.0
     cancel_requested: bool = False
+    pause_requested: bool = False    # operator intent, set/cleared over HTTP
+    paused: bool = False             # observed state, set/cleared only by the brain
+    guidance: list[str] = field(default_factory=list)   # pending steering messages
 ```
 
 One dataclass, one enum (`pending / running / done / failed / cancelled`), one exception (`TaskCancelled`). Deliberately boring: it's the contract every other module speaks, so it has zero dependencies and does zero I/O. Tasks live **only in memory** — a daemon restart forgets them. That's by design (see §6); the durable record is the run log.
+
+The three control fields at the bottom are the operator's steering wheel, and they all follow the same pattern as `cancel_requested`: an HTTP handler mutates them, the brain reads them at each step boundary, and because both sides share one event loop no locking is needed. The `pause_requested`/`paused` split matters for the UI: the first is "the user asked", the second is "the agent actually froze" — a pause requested mid-model-call takes a few seconds to land.
 
 ### 5.2 `agentos/daemon.py` — ingress and dispatch
 
@@ -185,6 +200,8 @@ async def worker(self, n):
 Why this shape: the original design brief called for SQLite in WAL mode with atomic locks, polled every second. All of that existed to coordinate *multiple processes*. Since the API handler and the workers live in **one asyncio event loop**, `await queue.get()` is already atomic — no locks, no polling, no race conditions, no database. The `asyncio.wait_for` wrapper is the timeout rail; the status transitions are what you see in `GET /tasks/<id>`.
 
 The daemon runs **one worker by default** — there's one desktop, and two tasks fighting over one mouse would be chaos. `main()` also calls `ensure_container()` so a bare `python -m agentos.daemon` brings up the whole system.
+
+Beyond the queue, the daemon is also the **control plane and file server for the dashboard**: pause/resume/guidance handlers just flip fields on the shared `Task` object (the brain notices at its next step), `GET /tasks/<id>/steps` parses `runs/<id>/steps.jsonl` into JSON with an `after=` cursor for cheap incremental polling (a half-written tail line is skipped and retried on the next poll), and `GET /runs/<id>/<name>` serves screenshots with both path segments whitelisted (`id` must be a known task, `name` must match `step_\d{3}\.png`) so the route can't be used for path traversal. Pause/resume/guidance return **409** on finished tasks — silently accepting steering for a task that will never read it would be lying to the operator. The `runs_root` constructor parameter keeps all of this testable against a tmp dir.
 
 ### 5.3 `agentos/sandbox.py` — the only place actions become real
 
@@ -255,7 +272,8 @@ types.GenerateContentConfig(
 ```python
 contents = [goal_text + initial_screenshot]
 for step in range(1, task.max_steps + 1):          # step-budget rail
-    if task.cancel_requested: raise TaskCancelled()  # kill-switch rail
+    await pause_gate(task, log, step)              # cancel + pause rails
+    self._drain_guidance(task, contents, log, step)  # operator steering
 
     response = await self._generate(contents)
     calls = [p.function_call for p in parts if p.function_call]
@@ -284,9 +302,17 @@ case "take_screenshot":
 
 `_to_xdotool_combo` translates model key names to X11 keysyms (`Enter → Return`, `page_down → Page_Down`, ...). Unknown actions raise, and the error is **sent back to the model** in the function response — so it can read the error and try a different approach instead of the task dying.
 
+**Custom tools: the agent has hands beyond the mouse.** Alongside the `computer_use` tool, `_config()` declares two ordinary function tools (`_CUSTOM_TOOLS`), and the system hint tells the model they exist:
+- `run_command(command)` → `sandbox.exec_shell()`: runs any bash command in the container and returns `{exit_code, output}` (output capped at 4 KB) to the model in the function response. Combined with the container's passwordless sudo this is what makes "install a package / download a file / fix the environment" possible — sudo without a shell channel was a capability the model couldn't reach.
+- `open_app(command)` → `sandbox.launch()`: starts a GUI program detached (e.g. `firefox-esr`, `xterm`). GUI programs must not go through `run_command` — they'd block until its timeout.
+
+This exists because of a real failure: Firefox died in a long-lived container, and the model burned steps trying Ubuntu shortcuts (Alt+F2, Super) that plain openbox doesn't have — it had sudo but no way to *use* it, and no way to launch anything. Unknown-action errors also return to the model, so even a wrong tool call is recoverable.
+
 **Screenshots are on-demand, not streamed.** `_settled_screenshot()` sleeps ~1 s after each action (letting the UI settle), captures, and downscales anything wider than 1366 px with Pillow. The original brief called for a 1 Hz screenshot stream to the model; that would burn tokens on frames where nothing changed. One screenshot per decision is all a ReAct loop needs.
 
 **History trimming.** Each screenshot is ~200 KB. Forty steps of history would blow past request limits, so `_trim_screenshots()` blanks the image bytes out of all but the last 3 function responses, leaving `{"screenshot": "elided"}` markers. The model keeps its full *action* history but only recent *vision* — enough to stay oriented.
+
+**Pause and steering.** `pause_gate` (shared by both brains) is the per-step control point: it raises `TaskCancelled` on cancel, and if `pause_requested` is set it sets `task.paused = True`, logs a `paused` event, and sleeps in 0.25 s ticks until the flag clears — still honoring cancel while frozen. `_drain_guidance` runs right after the gate: any queued operator messages are logged as `guidance` events and appended to `contents` as a single `role="user"` turn prefixed *"Operator guidance (incorporate into your next actions):"* — to the model it reads as fresh instruction between the last tool result and its next decision. Gate-then-drain ordering means guidance typed while paused is injected the moment you resume, before the next model call. `_trim_screenshots` never touches these turns (it only elides image blobs), so steering survives history trimming.
 
 **Budget synthesis.** If the step budget runs out, the brain doesn't just give up — it sends one final message: *"You have run out of action budget... give your best final answer in plain text now"* and returns that as a clearly-labeled best-effort result. Added after a real run spent its budget mid-investigation and threw away everything it had learned.
 
@@ -302,7 +328,7 @@ class RunLog:
     def save_screenshot(self, step, png):      # runs/<id>/step_NNN.png
 ```
 
-Every run produces `runs/<task-id>/steps.jsonl` — start, every action with the model's stated *intent*, every error, every screenshot path, the final status. When the agent does something weird, this file is how you replay its reasoning. Tasks are in-memory, but the evidence is forever.
+Every run produces `runs/<task-id>/steps.jsonl` — start, every action with the model's stated *intent*, every error, every screenshot path, the final status, plus the operator-control events `paused`, `resumed`, and `guidance` (with the message text). When the agent does something weird, this file is how you replay its reasoning — including what you told it mid-run. Tasks are in-memory, but the evidence is forever. The dashboard's activity feed is just this file, polled through `GET /tasks/<id>/steps`.
 
 ### 5.7 `sandbox/` — the virtual desktop image
 
@@ -322,6 +348,8 @@ USER agent                     # desktop processes run unprivileged (Firefox
                                # passwordless sudo — it can install packages or
                                # change anything in its sandbox when a task needs it
 ```
+
+The entrypoint also runs the browser in a **respawn loop** (`while true; do firefox-esr; sleep 2; done`) rather than launching it once: a crashed or model-closed Firefox used to leave an empty desktop for the rest of the container's life, stranding every later task.
 
 What each package is: **xvfb** = an X server that renders to memory instead of a monitor (the "invisible screen"); **openbox** = minimal window manager (chosen over the brief's `mutter`, which drags in DBus/GNOME and is flaky headless); **x11vnc** = mirrors the display over VNC; **novnc + websockify** = serves that VNC session as a web page at :6080; **scrot/xdotool** = the agent's eye and hand; **firefox-esr** = what the agent actually drives.
 
@@ -343,6 +371,18 @@ tail -f /dev/null    # PID 1 idles; the container lives until stopped
 
 ---
 
+### 5.8 `agentos/static/index.html` — the dashboard
+
+One self-contained HTML file (inline CSS + vanilla JS), served by the daemon at `GET /` with `Cache-Control: no-cache`. No framework, no build step, no new dependencies — the same philosophy as the rest of the repo.
+
+Layout: header with a daemon-health dot; a left column with the new-task form and the task list (status badges, with distinct "pausing…"/"paused" states derived from `pause_requested` vs `paused`); a main pane for the selected task with Pause/Resume, Cancel, and a steering input, plus three tabs — **Activity** (the live step feed), **Screenshot** (the latest `step_NNN.png`), and **Live desktop** (an embedded noVNC iframe, lazily attached on first view so idle dashboards don't hold a VNC connection).
+
+Mechanics worth knowing:
+- Everything is polling: `GET /tasks` every 1.5 s, `GET /health` every 5 s, and the feed via `GET /tasks/<id>/steps?after=<cursor>` — the cursor makes each poll return only new events. The newest task is auto-selected on load so opening the page during a run drops you straight into the action.
+- Screenshot `<img>` URLs carry a `?t=<now>` cache-buster because the brain **overwrites** `step_NNN.png` within a step (one file per step, one save per action).
+- The noVNC URL (`http://localhost:6080/vnc.html`) is a single constant at the top of the script — there is one container and one fixed port today; per-task views only become a thing if multi-worker/multi-container lands.
+- All user-controlled text (goals, guidance, event bodies) is rendered via `textContent`, never `innerHTML`, so a task goal containing HTML can't script the dashboard.
+
 ## 6. Design decisions and why
 
 | Decision | Why |
@@ -353,7 +393,10 @@ tail -f /dev/null    # PID 1 idles; the container lives until stopped
 | **`docker exec` as transport** | Zero infrastructure inside the container. ~100 ms overhead is irrelevant next to multi-second model calls. Swappable later via the `Sandbox` protocol. |
 | **openbox, not mutter** | mutter needs DBus/GNOME session scaffolding and is the reference implementations' main container headache; openbox just works. |
 | **One worker** | One desktop, one mouse. Parallelism would need one container per worker (a clean future extension — `DockerSandbox` already takes a container name). |
-| **Auto mode + rails instead of confirmations** | The point is autonomy. Step budgets, timeouts, cancel, and an unprivileged localhost-only sandbox make failures boring instead of dangerous. |
+| **Auto mode + rails instead of confirmations** | The point is autonomy. Step budgets, timeouts, cancel, and an unprivileged localhost-only sandbox make failures boring instead of dangerous. Pause/steer adds a human hand on the wheel *without* reintroducing per-action confirmations: the agent never waits for you unless you ask it to. |
+| **Steering via flags + a list, not channels/locks** | Pause, cancel, and guidance are plain fields on `Task`, mutated by HTTP handlers and read by the brain at step boundaries — same event loop, so it's race-free by construction. An `asyncio.Queue` for guidance would add nothing but a JSON-serialization headache. |
+| **Pause burns the timeout (v1)** | `asyncio.wait_for`'s deadline can't be extended mid-flight. Crediting paused time back needs a supervisor loop around the brain call — deferred (§10) rather than complicating the daemon's most failure-sensitive code path. A long pause can therefore time a task out; the dashboard shows both numbers. |
+| **Dashboard feed = polling JSONL, not SSE/websockets** | Single local operator, and the append-only `steps.jsonl` already exists. A cursor-based poll every 1.5 s is ~40 lines total and survives page reloads for free; streaming infra would be complexity with no observable benefit here. |
 | **Unprivileged container user, no host mounts** | Even a fully hijacked agent (e.g. via prompt injection on a malicious page) can only click around inside its own disposable desktop. |
 
 ---
@@ -396,4 +439,5 @@ tail -f /dev/null    # PID 1 idles; the container lives until stopped
 - **Faster transport**: FastAPI server inside the container implementing the `Sandbox` protocol over HTTP.
 - **Parallel tasks**: one container per worker; `DockerSandbox` already takes a container name.
 - **Persistence**: if tasks ever must survive restarts, put SQLite *behind* the `Task` model — the daemon's queue logic doesn't change.
+- **Pause that doesn't burn the timeout**: replace the worker's `asyncio.wait_for` with a small supervisor loop that tracks accumulated paused seconds and extends the deadline accordingly.
 - **Always-on**: wrap the daemon in a systemd user unit or tmux session.

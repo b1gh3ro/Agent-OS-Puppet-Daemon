@@ -23,8 +23,9 @@ x11vnc -display :99 -forever -shared -nopw -quiet &
 # Browser-based live view: http://localhost:6080 proxies to the VNC server.
 websockify --web /usr/share/novnc 6080 localhost:5900 &
 
-# Pre-launch the browser so tasks don't burn steps figuring out how to open it.
-firefox-esr >/dev/null 2>&1 &
+# Pre-launch the browser so tasks don't burn steps figuring out how to open
+# it — and respawn it if it ever dies, so the desktop is never left empty.
+(while true; do firefox-esr >/dev/null 2>&1; sleep 2; done) &
 
 echo "sandbox ready on :99 (${RESOLUTION}), watch at http://localhost:6080"
 tail -f /dev/null

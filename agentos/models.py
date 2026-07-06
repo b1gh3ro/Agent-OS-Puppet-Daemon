@@ -33,6 +33,13 @@ class Task:
     created_at: float = field(default_factory=time.time)
     finished_at: float | None = None
     cancel_requested: bool = False
+    pause_requested: bool = False  # operator intent, set/cleared over HTTP
+    paused: bool = False           # observed state, set/cleared only by the brain
+    guidance: list[str] = field(default_factory=list)
+
+    @property
+    def is_terminal(self) -> bool:
+        return self.status in (TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.CANCELLED)
 
     def to_dict(self) -> dict:
         return {
@@ -46,4 +53,8 @@ class Task:
             "timeout_seconds": self.timeout_seconds,
             "created_at": self.created_at,
             "finished_at": self.finished_at,
+            "cancel_requested": self.cancel_requested,
+            "pause_requested": self.pause_requested,
+            "paused": self.paused,
+            "pending_guidance": len(self.guidance),
         }

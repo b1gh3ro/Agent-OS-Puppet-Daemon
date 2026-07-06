@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
+import re
 import time
+from pathlib import Path
 
 from aiohttp import web
 from dotenv import load_dotenv
@@ -25,11 +28,16 @@ from .sandbox import DockerSandbox, Sandbox, ensure_container
 log = logging.getLogger("agentos")
 
 
+_SCREENSHOT_NAME = re.compile(r"^step_\d{3}\.png$")
+
+
 class Daemon:
-    def __init__(self, brain, sandbox: Sandbox, workers: int = 1):
+    def __init__(self, brain, sandbox: Sandbox, workers: int = 1,
+                 runs_root: str | Path = "runs"):
         self.brain = brain
         self.sandbox = sandbox
         self.workers = workers
+        self.runs_root = Path(runs_root)
         self.queue: asyncio.Queue[Task] = asyncio.Queue()
         self.tasks: dict[str, Task] = {}
 
@@ -43,7 +51,7 @@ class Daemon:
                 task.finished_at = time.time()
                 continue
             task.status = TaskStatus.RUNNING
-            run_log = RunLog(task.id)
+            run_log = RunLog(task.id, root=self.runs_root)
             run_log.event(0, "start", goal=task.goal, worker=n)
             log.info("worker %d: task %s started: %s", n, task.id, task.goal)
             try:
@@ -102,6 +110,78 @@ class Daemon:
         task.cancel_requested = True
         return web.json_response(task.to_dict())
 
+    def _get_live_task(self, request: web.Request) -> Task:
+        task = self.tasks.get(request.match_info["id"])
+        if not task:
+            raise web.HTTPNotFound(text="no such task")
+        if task.is_terminal:
+            raise web.HTTPConflict(text=f"task is already {task.status.value}")
+        return task
+
+    async def pause_task(self, request: web.Request) -> web.Response:
+        task = self._get_live_task(request)
+        task.pause_requested = True
+        return web.json_response(task.to_dict())
+
+    async def resume_task(self, request: web.Request) -> web.Response:
+        task = self._get_live_task(request)
+        task.pause_requested = False
+        return web.json_response(task.to_dict())
+
+    async def post_guidance(self, request: web.Request) -> web.Response:
+        task = self._get_live_task(request)
+        try:
+            body = await request.json()
+        except Exception:
+            raise web.HTTPBadRequest(text="body must be JSON")
+        text = (body.get("text") or "").strip()
+        if not text:
+            raise web.HTTPBadRequest(text='"text" is required')
+        task.guidance.append(text)
+        return web.json_response(task.to_dict())
+
+    async def get_steps(self, request: web.Request) -> web.Response:
+        task = self.tasks.get(request.match_info["id"])
+        if not task:
+            raise web.HTTPNotFound(text="no such task")
+        try:
+            after = int(request.query.get("after", "0"))
+        except ValueError:
+            raise web.HTTPBadRequest(text='"after" must be an integer')
+        path = self.runs_root / task.id / "steps.jsonl"
+        if not path.exists():  # pending task, or cancelled before it started
+            return web.json_response({"events": [], "next": after})
+        events = []
+        consumed = after
+        with path.open() as f:
+            for i, line in enumerate(f):
+                if i < after:
+                    continue
+                if i != consumed:  # don't skip past an unparsed line
+                    break
+                try:
+                    events.append(json.loads(line))
+                except json.JSONDecodeError:
+                    break  # half-written tail line; retry it on the next poll
+                consumed = i + 1
+        return web.json_response({"events": events, "next": consumed})
+
+    async def get_screenshot(self, request: web.Request) -> web.Response:
+        task_id, name = request.match_info["id"], request.match_info["name"]
+        # Whitelist both segments so the route can't be used for traversal.
+        if task_id not in self.tasks or not _SCREENSHOT_NAME.match(name):
+            raise web.HTTPNotFound()
+        path = self.runs_root / task_id / name
+        if not path.is_file():
+            raise web.HTTPNotFound()
+        return web.FileResponse(path, headers={"Cache-Control": "no-store"})
+
+    async def index(self, request: web.Request) -> web.Response:
+        return web.FileResponse(
+            Path(__file__).parent / "static" / "index.html",
+            headers={"Cache-Control": "no-cache"},
+        )
+
     async def health(self, request: web.Request) -> web.Response:
         return web.json_response({
             "ok": True,
@@ -116,7 +196,13 @@ class Daemon:
         app.router.add_get("/tasks", self.get_tasks)
         app.router.add_get("/tasks/{id}", self.get_task)
         app.router.add_post("/tasks/{id}/cancel", self.cancel_task)
+        app.router.add_post("/tasks/{id}/pause", self.pause_task)
+        app.router.add_post("/tasks/{id}/resume", self.resume_task)
+        app.router.add_post("/tasks/{id}/guidance", self.post_guidance)
+        app.router.add_get("/tasks/{id}/steps", self.get_steps)
+        app.router.add_get("/runs/{id}/{name}", self.get_screenshot)
         app.router.add_get("/health", self.health)
+        app.router.add_get("/", self.index)
 
         async def start_workers(app: web.Application):
             app["workers"] = [asyncio.create_task(self.worker(i)) for i in range(self.workers)]
@@ -131,11 +217,12 @@ class Daemon:
 
 
 def make_brain(kind: str):
+    stub_steps = int(os.getenv("AGENT_STUB_STEPS", "3"))
     if kind == "stub":
-        return StubBrain()
+        return StubBrain(steps=stub_steps)
     if not os.getenv("GEMINI_API_KEY"):
         log.warning("GEMINI_API_KEY not set — falling back to stub brain")
-        return StubBrain()
+        return StubBrain(steps=stub_steps)
     return GeminiBrain(model=os.getenv("AGENT_MODEL") or None)
 
 
