@@ -4,6 +4,10 @@ set -e
 
 RESOLUTION="${RESOLUTION:-1280x800x24}"
 
+# A container that gets stopped uncleanly (host sleep, Docker restart) leaves
+# this socket behind; a stale one makes Xvfb refuse to start on :99 at all.
+rm -f /tmp/.X11-unix/X99
+
 Xvfb :99 -screen 0 "$RESOLUTION" -nolisten tcp &
 
 # Wait for the display socket before starting clients.
