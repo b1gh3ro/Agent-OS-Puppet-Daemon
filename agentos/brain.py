@@ -160,6 +160,20 @@ class GeminiBrain:
                 return getattr(types.Environment, name)
         raise RuntimeError("installed google-genai SDK has no computer-use environments")
 
+    @staticmethod
+    def _safety_settings() -> list[types.SafetySetting]:
+        """Default thresholds nondeterministically block benign computer-use
+        turns (BlockedReason.SAFETY on 'play music on spotify'); relax them —
+        the sandbox, not the content filter, is our containment story."""
+        names = ("HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH",
+                 "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT",
+                 "HARM_CATEGORY_CIVIC_INTEGRITY")
+        return [
+            types.SafetySetting(category=getattr(types.HarmCategory, name),
+                                threshold=types.HarmBlockThreshold.BLOCK_NONE)
+            for name in names if hasattr(types.HarmCategory, name)
+        ]
+
     def _config(self) -> types.GenerateContentConfig:
         return types.GenerateContentConfig(
             tools=[
@@ -169,6 +183,7 @@ class GeminiBrain:
                 )),
                 types.Tool(function_declarations=_CUSTOM_TOOLS),
             ],
+            safety_settings=self._safety_settings(),
         )
 
     async def _generate(self, contents):
