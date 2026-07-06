@@ -28,8 +28,8 @@ class Task:
     result: str | None = None
     error: str | None = None
     steps_taken: int = 0
-    max_steps: int = 40
-    timeout_seconds: float = 600.0
+    max_steps: int = 300
+    timeout_seconds: float = 3600.0
     created_at: float = field(default_factory=time.time)
     finished_at: float | None = None
     cancel_requested: bool = False

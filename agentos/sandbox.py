@@ -143,6 +143,11 @@ async def ensure_container(
             "docker", "run", "-d", "--name", container,
             "-p", f"127.0.0.1:{vnc_port}:5900",
             "-p", f"127.0.0.1:{novnc_port}:6080",
+            # Brakes off: full kernel capabilities so the agent can do anything
+            # a root user could (mount, modify sysctl, run nested containers…),
+            # and a big /dev/shm so heavy browser tabs don't crash.
+            "--privileged",
+            "--shm-size=2g",
             image,
         ]
     proc = await asyncio.create_subprocess_exec(

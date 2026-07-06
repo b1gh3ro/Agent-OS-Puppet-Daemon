@@ -131,8 +131,8 @@
     <form id="new-task">
       <textarea id="goal" placeholder="What should the agent do?" required></textarea>
       <div class="row">
-        <input id="max-steps" type="number" min="1" value="40" title="max steps">
-        <input id="timeout" type="number" min="10" value="600" title="timeout (s)">
+        <input id="max-steps" type="number" min="1" value="300" title="max steps">
+        <input id="timeout" type="number" min="10" value="3600" title="timeout (s)">
         <button type="submit" class="primary">Run</button>
       </div>
     </form>
@@ -241,8 +241,8 @@ $("new-task").addEventListener("submit", async e => {
   try {
     t = await post("/tasks", {
       goal,
-      max_steps: +$("max-steps").value || 40,
-      timeout_seconds: +$("timeout").value || 600,
+      max_steps: +$("max-steps").value || 300,
+      timeout_seconds: +$("timeout").value || 3600,
     });
   } catch (e) {
     alert(`Could not submit task: ${e.message}`);

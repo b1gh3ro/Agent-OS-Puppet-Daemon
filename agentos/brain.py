@@ -307,7 +307,8 @@ class GeminiBrain:
         log.event(task.max_steps, "budget_synthesis", result=text)
         if text:
             return f"(step budget of {task.max_steps} exhausted; best-effort answer)\n{text}"
-        raise RuntimeError(f"step budget of {task.max_steps} exhausted with no answer")
+        return (f"(step budget of {task.max_steps} exhausted with no answer — "
+                "raise max_steps if the task needs more actions)")
 
     @staticmethod
     def _auto_acknowledge_safety(args: dict, log: RunLog, step: int) -> bool:

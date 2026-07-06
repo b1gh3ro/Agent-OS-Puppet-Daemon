@@ -87,8 +87,8 @@ class Daemon:
             raise web.HTTPBadRequest(text='"goal" is required')
         task = Task(
             goal=goal,
-            max_steps=int(body.get("max_steps", 40)),
-            timeout_seconds=float(body.get("timeout_seconds", 600)),
+            max_steps=int(body.get("max_steps", 300)),
+            timeout_seconds=float(body.get("timeout_seconds", 3600)),
         )
         self.tasks[task.id] = task
         await self.queue.put(task)
