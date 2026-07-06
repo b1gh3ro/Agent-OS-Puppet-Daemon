@@ -316,9 +316,11 @@ RUN apt-get install ... xvfb openbox x11vnc xdotool scrot xterm firefox-esr novn
 COPY policies.json /usr/share/firefox-esr/distribution/policies.json
 RUN mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix   # Xvfb can't create
                                # this as non-root; pre-create it as root
-RUN useradd -m agent
-USER agent                     # the desktop runs unprivileged — the AI never
-                               # has root even inside its own sandbox
+RUN useradd -m agent && echo "agent ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/agent
+USER agent                     # desktop processes run unprivileged (Firefox
+                               # misbehaves as root), but the agent has
+                               # passwordless sudo — it can install packages or
+                               # change anything in its sandbox when a task needs it
 ```
 
 What each package is: **xvfb** = an X server that renders to memory instead of a monitor (the "invisible screen"); **openbox** = minimal window manager (chosen over the brief's `mutter`, which drags in DBus/GNOME and is flaky headless); **x11vnc** = mirrors the display over VNC; **novnc + websockify** = serves that VNC session as a web page at :6080; **scrot/xdotool** = the agent's eye and hand; **firefox-esr** = what the agent actually drives.

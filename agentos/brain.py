@@ -31,6 +31,9 @@ MAX_SCREENSHOTS_IN_HISTORY = 3
 SYSTEM_HINT = (
     "You are operating a Linux desktop ({w}x{h}) inside a sandbox. "
     "Firefox ESR is installed (a browser may need to be opened first). "
+    "You have full control: a terminal (xterm) is available, and you have "
+    "passwordless sudo, so you can download files or install packages "
+    "(e.g. 'sudo apt-get install -y <pkg>') whenever the task needs it. "
     "Complete this task, then answer in plain text with the outcome:\n\n{goal}"
 )
 
