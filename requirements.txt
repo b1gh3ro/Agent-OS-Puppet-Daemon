@@ -1,0 +1,5 @@
+aiohttp>=3.10
+google-genai>=1.16
+python-dotenv>=1.0
+pillow>=10.0
+pytest>=8.0

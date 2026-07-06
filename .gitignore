@@ -1,0 +1,7 @@
+.venv-wsl/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+runs/
+resume.tex
