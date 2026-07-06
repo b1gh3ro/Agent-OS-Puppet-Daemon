@@ -36,6 +36,7 @@ class Task:
     pause_requested: bool = False  # operator intent, set/cleared over HTTP
     paused: bool = False           # observed state, set/cleared only by the brain
     guidance: list[str] = field(default_factory=list)
+    wait_message: str | None = None  # set when the agent itself asks the operator to act
 
     @property
     def is_terminal(self) -> bool:
@@ -57,4 +58,5 @@ class Task:
             "pause_requested": self.pause_requested,
             "paused": self.paused,
             "pending_guidance": len(self.guidance),
+            "wait_message": self.wait_message,
         }

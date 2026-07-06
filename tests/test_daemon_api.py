@@ -96,6 +96,29 @@ def test_pause_gate_unit(tmp_path):
     asyncio.run(inner())
 
 
+def test_wait_for_user_unit(tmp_path):
+    async def inner():
+        task = Task(goal="x")
+        log = RunLog(task.id, root=tmp_path)
+
+        waiter = asyncio.ensure_future(
+            GeminiBrain._wait_for_user(task, {"message": "log in for me"}, log, 1))
+        await _wait_for(lambda: task.paused)
+        assert task.wait_message == "log in for me"
+        assert task.pause_requested and not waiter.done()
+
+        task.pause_requested = False  # operator hits Resume
+        result = await waiter
+        assert result["resumed"] is True
+        assert task.wait_message is None and not task.paused
+
+        kinds = [json.loads(line)["kind"]
+                 for line in (tmp_path / task.id / "steps.jsonl").read_text().splitlines()]
+        assert kinds == ["wait_for_user", "paused", "resumed"]
+
+    asyncio.run(inner())
+
+
 def test_drain_guidance_unit(tmp_path):
     task = Task(goal="x")
     log = RunLog(task.id, root=tmp_path)

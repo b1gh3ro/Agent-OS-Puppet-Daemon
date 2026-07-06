@@ -43,6 +43,10 @@ SYSTEM_HINT = (
     "after pure shell work.\n"
     "- open_app(command): launch a GUI program detached, e.g. "
     "open_app(command='firefox-esr') or open_app(command='xterm').\n"
+    "- wait_for_user(message): when you hit something only the human can do "
+    "(a login, captcha, payment, or a decision), call this with clear "
+    "instructions; the task pauses until they resume, then you get a fresh "
+    "screenshot of what they did.\n"
     "Firefox ESR is installed and usually already open; if the screen looks "
     "empty, call open_app(command='firefox-esr') instead of hunting for a "
     "launcher. You have a budget of {max_steps} actions for this task; each "
@@ -89,6 +93,26 @@ _CUSTOM_TOOLS = [
                 "intent": {"type": "string", "description": "One line: why you are launching it."},
             },
             "required": ["command"],
+        },
+    },
+    {
+        "name": "wait_for_user",
+        "description": (
+            "Pause and hand control to the human operator when you are blocked "
+            "on something only they can do — logging in, solving a captcha, "
+            "making a payment, a yes/no decision, plugging in a device. Put "
+            "clear instructions in 'message'. The task freezes and the operator "
+            "sees your message; it resumes only when they click Resume, after "
+            "which you get a fresh screenshot of whatever they changed. Use "
+            "sparingly — prefer doing things yourself."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "message": {"type": "string", "description":
+                    "Exactly what you need the operator to do before you can continue."},
+            },
+            "required": ["message"],
         },
     },
 ]
@@ -225,6 +249,20 @@ class GeminiBrain:
         return True
 
     @staticmethod
+    async def _wait_for_user(task: Task, args: dict, log: RunLog, step: int) -> dict:
+        """Model-initiated pause: surface a message and block until the operator
+        resumes (reusing the same pause flag the Resume button flips)."""
+        msg = str(args.get("message") or "Waiting for you to continue.").strip()
+        task.wait_message = msg
+        task.pause_requested = True
+        log.event(step, "wait_for_user", message=msg)
+        try:
+            await pause_gate(task, log, step)  # blocks until Resume; raises on Cancel
+        finally:
+            task.wait_message = None
+        return {"resumed": True, "note": "Operator resumed; screen reflects their changes."}
+
+    @staticmethod
     def _drain_guidance(task: Task, contents: list[types.Content],
                         log: RunLog, step: int) -> None:
         """Inject pending operator guidance as a user turn before the next call."""
@@ -278,9 +316,22 @@ class GeminiBrain:
             for fc in calls:
                 args = dict(fc.args or {})
                 log.event(step, "action", name=fc.name, args=args)
+
+                if fc.name == "wait_for_user":
+                    # A control action, not a sandbox one: hand control to the
+                    # operator and block here until they resume.
+                    payload: dict = await self._wait_for_user(task, args, log, step)
+                    fr_parts = [types.FunctionResponsePart(inline_data=types.FunctionResponseBlob(
+                        mime_type="image/png", data=(png := await self._settled_screenshot(sandbox)),
+                    ))]
+                    log.event(step, "screenshot", path=log.save_screenshot(step, png))
+                    response_parts.append(types.Part(function_response=types.FunctionResponse(
+                        name=fc.name, response=payload, parts=fr_parts)))
+                    continue
+
                 acknowledged = self._auto_acknowledge_safety(args, log, step)
                 try:
-                    payload: dict = await self._execute(fc.name, args, sandbox) or {}
+                    payload = await self._execute(fc.name, args, sandbox) or {}
                 except Exception as e:
                     payload = {"error": str(e)}
                     log.event(step, "action_error", name=fc.name, error=str(e))
