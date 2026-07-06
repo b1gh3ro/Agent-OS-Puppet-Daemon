@@ -328,7 +328,7 @@ class RunLog:
     def save_screenshot(self, step, png):      # runs/<id>/step_NNN.png
 ```
 
-Every run produces `runs/<task-id>/steps.jsonl` — start, every action with the model's stated *intent*, every error, every screenshot path, the final status, plus the operator-control events `paused`, `resumed`, and `guidance` (with the message text). When the agent does something weird, this file is how you replay its reasoning — including what you told it mid-run. Tasks are in-memory, but the evidence is forever. The dashboard's activity feed is just this file, polled through `GET /tasks/<id>/steps`.
+Every run produces `runs/<task-id>/steps.jsonl` — start, every action with the model's stated *intent*, every error, every screenshot path, the final status, plus the operator-control events `paused`, `resumed`, and `guidance` (with the message text), and `action_result` (a `run_command`'s exit code and first 1 KB of output — `run_command` never touches the visible desktop, so this is the only place a human sees what the shell returned). When the agent does something weird, this file is how you replay its reasoning — including what you told it mid-run. Tasks are in-memory, but the evidence is forever. The dashboard's activity feed is just this file, polled through `GET /tasks/<id>/steps`.
 
 ### 5.7 `sandbox/` — the virtual desktop image
 

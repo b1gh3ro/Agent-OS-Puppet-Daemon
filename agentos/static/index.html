@@ -79,6 +79,8 @@
   #detail-result {
     margin-top: 8px; padding: 8px 10px; border-radius: 6px; background: var(--panel2);
     font-size: 13px; white-space: pre-wrap; display: none;
+    max-height: 35vh; overflow-y: auto; /* long answers scroll instead of pushing the UI down */
+    resize: vertical; /* drag the bottom edge to shrink it and reveal the tabs */
   }
   #detail-result.error { color: var(--err); }
 
@@ -104,6 +106,8 @@
   .ev.action .kind { color: var(--accent); }
   .ev.guidance { background: rgba(192,132,252,.08); border-radius: 4px; }
   .ev.guidance .kind { color: var(--purple); }
+  .ev.action_result { background: rgba(110,168,254,.06); border-radius: 4px; }
+  .ev.action_result .body { font-family: ui-monospace, monospace; font-size: 12px; }
   .ev.paused .kind, .ev.resumed .kind { color: var(--warn); }
   .ev.action_error .kind, .ev.final-failed .kind { color: var(--err); }
   .ev.done .kind, .ev.final-done .kind { color: var(--ok); }
@@ -321,6 +325,10 @@ function evBody(e) {
       return `${e.name}${extra}${intent ? ` — ${intent}` : ""}`;
     }
     case "guidance": return e.text;
+    case "action_result": {
+      const out = (e.output || "").trim();
+      return `exit ${e.exit_code}${out ? `\n${out}` : ""}`;
+    }
     case "action_error": return `${e.name}: ${e.error}`;
     case "done": case "budget_synthesis": return e.result || "";
     case "final": return `${e.status}${e.error ? ` — ${e.error}` : ""}`;

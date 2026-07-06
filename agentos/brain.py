@@ -238,6 +238,10 @@ class GeminiBrain:
                     log.event(step, "action_error", name=fc.name, error=str(e))
                 if acknowledged:
                     payload["safety_acknowledgement"] = "true"
+                if "output" in payload:  # surface shell results in the run log/feed
+                    log.event(step, "action_result", name=fc.name,
+                              exit_code=payload.get("exit_code"),
+                              output=payload["output"][:1000])
 
                 png = await self._settled_screenshot(sandbox)
                 path = log.save_screenshot(step, png)
