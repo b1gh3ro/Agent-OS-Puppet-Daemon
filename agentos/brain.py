@@ -119,6 +119,10 @@ _CUSTOM_TOOLS = [
 
 RUN_COMMAND_OUTPUT_LIMIT = 4000
 
+# After this many *consecutive* blocked/empty responses, stop silently
+# retrying and hand control to the operator instead of spinning.
+BLOCK_PAUSE_THRESHOLD = 3
+
 # Model key names -> xdotool keysym names (pass-through when unmapped).
 _KEYMAP = {
     "enter": "Return", "return": "Return", "esc": "Escape", "escape": "Escape",
@@ -249,6 +253,24 @@ class GeminiBrain:
         return True
 
     @staticmethod
+    async def _pause_for_block(task: Task, log: RunLog, step: int, streak: int) -> None:
+        """Google's safety filter keeps blocking the turn: hand control to the
+        operator with instructions instead of retrying forever."""
+        task.wait_message = (
+            f"Google's safety filter blocked my last {streak} turns "
+            "(block_reason=SAFETY), so I can't continue on my own. You can: "
+            "1) rephrase the task without sensitive wording and send it in the "
+            "steer box, 2) do the blocked step yourself on the desktop, then "
+            "Resume, or 3) just Resume to let me try again."
+        )
+        task.pause_requested = True
+        log.event(step, "blocked_pause", streak=streak)
+        try:
+            await pause_gate(task, log, step)  # blocks until Resume; raises on Cancel
+        finally:
+            task.wait_message = None
+
+    @staticmethod
     async def _wait_for_user(task: Task, args: dict, log: RunLog, step: int) -> dict:
         """Model-initiated pause: surface a message and block until the operator
         resumes (reusing the same pause flag the Resume button flips)."""
@@ -288,6 +310,7 @@ class GeminiBrain:
             ])
         ]
 
+        blocked_streak = 0
         for step in range(1, task.max_steps + 1):
             await pause_gate(task, log, step)
             self._drain_guidance(task, contents, log, step)
@@ -299,11 +322,17 @@ class GeminiBrain:
                 # Filtered/empty responses happen; nudge instead of crashing.
                 detail = str(getattr(response, "prompt_feedback", None) or "no detail")
                 log.event(step, "empty_response", detail=detail)
+                blocked_streak += 1
+                if blocked_streak >= BLOCK_PAUSE_THRESHOLD:
+                    # Google keeps blocking us — stop spinning, ask the human.
+                    await self._pause_for_block(task, log, step, blocked_streak)
+                    blocked_streak = 0
                 contents.append(types.Content(role="user", parts=[types.Part(text=(
                     "(Your previous turn came back empty — possibly filtered. "
                     "Continue the task, taking a different approach if the last "
                     "action was the trigger.)"))]))
                 continue
+            blocked_streak = 0
             contents.append(candidate.content)
 
             calls = [p.function_call for p in (candidate.content.parts or []) if p.function_call]

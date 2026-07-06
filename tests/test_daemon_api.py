@@ -119,6 +119,28 @@ def test_wait_for_user_unit(tmp_path):
     asyncio.run(inner())
 
 
+def test_pause_for_block_unit(tmp_path):
+    async def inner():
+        task = Task(goal="x")
+        log = RunLog(task.id, root=tmp_path)
+
+        waiter = asyncio.ensure_future(
+            GeminiBrain._pause_for_block(task, log, 5, 3))
+        await _wait_for(lambda: task.paused)
+        assert task.pause_requested and not waiter.done()
+        assert task.wait_message and "safety filter" in task.wait_message
+
+        task.pause_requested = False  # operator resumes
+        await waiter
+        assert task.wait_message is None and not task.paused
+
+        kinds = [json.loads(line)["kind"]
+                 for line in (tmp_path / task.id / "steps.jsonl").read_text().splitlines()]
+        assert "blocked_pause" in kinds
+
+    asyncio.run(inner())
+
+
 def test_drain_guidance_unit(tmp_path):
     task = Task(goal="x")
     log = RunLog(task.id, root=tmp_path)

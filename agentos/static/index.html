@@ -114,8 +114,8 @@
   .ev.guidance .kind { color: var(--purple); }
   .ev.action_result { background: rgba(110,168,254,.06); border-radius: 4px; }
   .ev.action_result .body { font-family: ui-monospace, monospace; font-size: 12px; }
-  .ev.paused .kind, .ev.resumed .kind, .ev.wait_for_user .kind { color: var(--warn); }
-  .ev.wait_for_user { background: rgba(251,191,36,.08); border-radius: 4px; }
+  .ev.paused .kind, .ev.resumed .kind, .ev.wait_for_user .kind, .ev.blocked_pause .kind { color: var(--warn); }
+  .ev.wait_for_user, .ev.blocked_pause { background: rgba(251,191,36,.08); border-radius: 4px; }
   .ev.action_error .kind, .ev.final-failed .kind, .ev.empty_response .kind { color: var(--err); }
   .ev.done .kind, .ev.final-done .kind { color: var(--ok); }
 
@@ -353,6 +353,7 @@ function evBody(e) {
     }
     case "action_error": return `${e.name}: ${e.error}`;
     case "empty_response": return `model returned nothing (${e.detail}); retrying`;
+    case "blocked_pause": return `Google blocked ${e.streak} turns in a row — paused for you to help`;
     case "done": case "budget_synthesis": return e.result || "";
     case "final": return `${e.status}${e.error ? ` — ${e.error}` : ""}`;
     case "screenshot": return null; // rendered in the Screenshot tab instead
