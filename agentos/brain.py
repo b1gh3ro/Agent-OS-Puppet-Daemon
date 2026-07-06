@@ -41,8 +41,10 @@ SYSTEM_HINT = (
     "open_app(command='firefox-esr') or open_app(command='xterm').\n"
     "Firefox ESR is installed and usually already open; if the screen looks "
     "empty, call open_app(command='firefox-esr') instead of hunting for a "
-    "launcher. Complete this task, then answer in plain text with the "
-    "outcome:\n\n{goal}"
+    "launcher. You have a budget of {max_steps} actions for this task; each "
+    "action result tells you how many remain — make sure you deliver your "
+    "final answer before it runs out. Complete this task, then answer in "
+    "plain text with the outcome:\n\n{goal}"
 )
 
 _CUSTOM_TOOLS = [
@@ -206,7 +208,8 @@ class GeminiBrain:
         log.save_screenshot(0, png)
         contents: list[types.Content] = [
             types.Content(role="user", parts=[
-                types.Part(text=SYSTEM_HINT.format(w=sandbox.width, h=sandbox.height, goal=task.goal)),
+                types.Part(text=SYSTEM_HINT.format(w=sandbox.width, h=sandbox.height,
+                                                   goal=task.goal, max_steps=task.max_steps)),
                 types.Part.from_bytes(data=png, mime_type="image/png"),
             ])
         ]
@@ -217,7 +220,16 @@ class GeminiBrain:
             task.steps_taken = step
 
             response = await self._generate(contents)
-            candidate = response.candidates[0]
+            candidate = response.candidates[0] if response.candidates else None
+            if candidate is None or candidate.content is None:
+                # Filtered/empty responses happen; nudge instead of crashing.
+                detail = str(getattr(response, "prompt_feedback", None) or "no detail")
+                log.event(step, "empty_response", detail=detail)
+                contents.append(types.Content(role="user", parts=[types.Part(text=(
+                    "(Your previous turn came back empty — possibly filtered. "
+                    "Continue the task, taking a different approach if the last "
+                    "action was the trigger.)"))]))
+                continue
             contents.append(candidate.content)
 
             calls = [p.function_call for p in (candidate.content.parts or []) if p.function_call]
@@ -258,6 +270,11 @@ class GeminiBrain:
                     )
                 ))
 
+            remaining = task.max_steps - step
+            response_parts.append(types.Part(text=(
+                f"[budget: {remaining} of {task.max_steps} actions remaining"
+                + (" — give your final answer now]" if remaining <= 3 else "]")
+            )))
             contents.append(types.Content(role="user", parts=response_parts))
             self._trim_screenshots(contents)
 
@@ -269,7 +286,8 @@ class GeminiBrain:
             "to the task in plain text now."
         ))]))
         response = await self._generate(contents)
-        parts = response.candidates[0].content.parts or []
+        candidates = response.candidates or []
+        parts = (candidates[0].content.parts if candidates and candidates[0].content else None) or []
         text = "".join(p.text or "" for p in parts if p.text).strip()
         log.event(task.max_steps, "budget_synthesis", result=text)
         if text:
