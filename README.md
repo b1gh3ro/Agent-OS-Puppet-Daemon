@@ -84,18 +84,3 @@ cat runs/<id>/steps.jsonl                         # replay every action it took
 - `docker stop agent-sandbox` stops the virtual desktop (the daemon restarts it next launch).
 - Task history is forgotten on restart by design; the `runs/` folders keep the evidence.
 
-## Writing good goals
-
-- Always end with **"report X"** — tell it what the answer should contain.
-- Name the website. "Go to site Z and do X" works; "find me something good" wanders.
-- Give a fallback for sites that need login: *"if the page can't be read, summarize from the comments instead."*
-- Multi-site tasks need `"max_steps": 40` or more.
-
-## If something breaks
-
-| Problem | Fix |
-|---|---|
-| `curl: connection refused` | Daemon isn't running (step 4) |
-| Task stuck on `pending` | It runs one task at a time — wait or cancel the earlier one |
-| noVNC won't connect | Click Connect again; check `docker ps` shows agent-sandbox |
-| Want to test without using the API | `.venv-wsl/bin/python -m agentos.daemon --brain stub` |
