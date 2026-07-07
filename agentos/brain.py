@@ -46,7 +46,11 @@ SYSTEM_HINT = (
     "- wait_for_user(message): when you hit something only the human can do "
     "(a login, captcha, payment, or a decision), call this with clear "
     "instructions; the task pauses until they resume, then you get a fresh "
-    "screenshot of what they did.\n"
+    "screenshot of what they did. The operator only sees this same desktop "
+    "through a remote view — they cannot open apps, terminals, or files "
+    "themselves. Before handing off, open whatever window they need, and in "
+    "your message say exactly which window to use and where to click or "
+    "type.\n"
     "Firefox ESR is installed and usually already open; if the screen looks "
     "empty, call open_app(command='firefox-esr') instead of hunting for a "
     "launcher. You have a budget of {max_steps} actions for this task; each "
@@ -103,8 +107,12 @@ _CUSTOM_TOOLS = [
             "making a payment, a yes/no decision, plugging in a device. Put "
             "clear instructions in 'message'. The task freezes and the operator "
             "sees your message; it resumes only when they click Resume, after "
-            "which you get a fresh screenshot of whatever they changed. Use "
-            "sparingly — prefer doing things yourself."
+            "which you get a fresh screenshot of whatever they changed. The "
+            "operator works through a remote view of this same desktop and "
+            "CANNOT open apps, terminals, or files — they can only use windows "
+            "already on screen. Open the window they need BEFORE calling this, "
+            "and spell out in 'message' which window to use and where to click "
+            "or type. Use sparingly — prefer doing things yourself."
         ),
         "parameters": {
             "type": "object",
