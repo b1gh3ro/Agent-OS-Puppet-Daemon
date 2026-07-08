@@ -86,7 +86,7 @@
     margin-top: 8px; padding: 8px 10px; border-radius: 6px; background: var(--panel2);
     font-size: 13px; white-space: pre-wrap; display: none;
     max-height: 35vh; overflow-y: auto; /* long answers scroll instead of pushing the UI down */
-    resize: vertical; /* drag the bottom edge to shrink it and reveal the tabs */
+    resize: vertical; min-height: 40px; /* drag the bottom edge to any size */
   }
   #detail-result.error { color: var(--err); }
 
@@ -305,6 +305,9 @@ function renderDetail() {
   }
 
   const res = $("detail-result");
+  // The 35vh max-height is only the *default* cap; once the user grabs the
+  // resize handle, lift it so the box can be dragged as tall as they like.
+  res.onpointerdown = () => { res.style.maxHeight = "none"; };
   if (t.result || t.error) {
     res.style.display = "block";
     res.classList.toggle("error", !!t.error);
