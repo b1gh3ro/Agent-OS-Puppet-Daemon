@@ -59,6 +59,15 @@ SYSTEM_HINT = (
     "plain text with the outcome:\n\n{goal}"
 )
 
+# Prepended instead of SYSTEM_HINT when the operator continues a finished
+# task: the model already carries the session in its history.
+CONTINUE_HINT = (
+    "The operator has a follow-up for you in this same session. The desktop "
+    "is as you left it; a fresh screenshot is attached. You have a new budget "
+    "of {max_steps} actions. Complete the follow-up, then answer in plain "
+    "text with the outcome:\n\n{goal}"
+)
+
 _CUSTOM_TOOLS = [
     {
         "name": "run_command",
@@ -180,7 +189,7 @@ class StubBrain:
     async def run_task(self, task: Task, sandbox: Sandbox, log: RunLog) -> str:
         for step in range(1, self.steps + 1):
             await pause_gate(task, log, step)
-            if task.guidance:  # no model to steer; just log and clear
+            if task.guidance:
                 for text in task.guidance:
                     log.event(step, "guidance", text=text)
                 task.guidance.clear()
@@ -208,8 +217,7 @@ class GeminiBrain:
     @staticmethod
     def _safety_settings() -> list[types.SafetySetting]:
         """Default thresholds nondeterministically block benign computer-use
-        turns (BlockedReason.SAFETY on 'play music on spotify'); relax them —
-        the sandbox, not the content filter, is our containment story."""
+        turns (BlockedReason.SAFETY on 'play music on spotify');"""
         names = ("HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH",
                  "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT",
                  "HARM_CATEGORY_CIVIC_INTEGRITY")
@@ -239,16 +247,15 @@ class GeminiBrain:
                 response = await self.client.aio.models.generate_content(
                     model=model, contents=contents, config=self._config(),
                 )
-                self._models = [model]  # lock in the working model
+                self._models = [model]  
                 return response
-            except Exception as e:  # try next candidate only for model-availability errors
+            except Exception as e:  
                 last_error = e
                 message = str(e).lower()
                 if not any(hint in message for hint in ("not found", "not supported", "invalid model", "404")):
                     raise
         raise last_error  # type: ignore[misc]
 
-    # Actions whose feedback is text, not pixels — no screenshot unless asked.
     _TEXT_ONLY_ACTIONS = {"run_command"}
 
     @classmethod
@@ -310,14 +317,23 @@ class GeminiBrain:
     async def run_task(self, task: Task, sandbox: Sandbox, log: RunLog) -> str:
         png = await self._settled_screenshot(sandbox, delay=0)
         log.save_screenshot(0, png)
-        contents: list[types.Content] = [
-            types.Content(role="user", parts=[
-                types.Part(text=SYSTEM_HINT.format(w=sandbox.width, h=sandbox.height,
-                                                   goal=task.goal, max_steps=task.max_steps)),
-                types.Part.from_bytes(data=png, mime_type="image/png"),
-            ])
-        ]
+        # A follow-up run resumes the saved conversation; a fresh task starts one.
+        hint = SYSTEM_HINT if task.history is None else CONTINUE_HINT
+        contents: list[types.Content] = task.history or []
+        contents.append(types.Content(role="user", parts=[
+            types.Part(text=hint.format(w=sandbox.width, h=sandbox.height,
+                                        goal=task.goal, max_steps=task.max_steps)),
+            types.Part.from_bytes(data=png, mime_type="image/png"),
+        ]))
+        try:
+            return await self._loop(task, sandbox, log, contents)
+        finally:
+            # Keep the conversation (even after cancel/timeout) so the
+            # operator can continue the task from where it stopped.
+            task.history = contents
 
+    async def _loop(self, task: Task, sandbox: Sandbox, log: RunLog,
+                    contents: list[types.Content]) -> str:
         blocked_streak = 0
         for step in range(1, task.max_steps + 1):
             await pause_gate(task, log, step)
@@ -355,7 +371,7 @@ class GeminiBrain:
                 log.event(step, "action", name=fc.name, args=args)
 
                 if fc.name == "wait_for_user":
-                    # A control action, not a sandbox one: hand control to the
+                    # hand control to the
                     # operator and block here until they resume.
                     payload: dict = await self._wait_for_user(task, args, log, step)
                     fr_parts = [types.FunctionResponsePart(inline_data=types.FunctionResponseBlob(

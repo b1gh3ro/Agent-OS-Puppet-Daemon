@@ -288,3 +288,55 @@ def test_screenshot_route(tmp_path):
             assert resp.status == 404
 
     asyncio.run(inner())
+
+def test_continue_endpoint(tmp_path):
+    async def inner():
+        daemon, client = _client(tmp_path, steps=2)
+        async with client:
+            resp = await client.post("/tasks/nope/continue", json={"goal": "more"})
+            assert resp.status == 404
+
+            resp = await client.post("/tasks", json={"goal": "stub", "max_steps": 10})
+            tid = (await resp.json())["id"]
+            task = daemon.tasks[tid]
+
+            # Still running -> 409 (steer with /guidance instead).
+            resp = await client.post(f"/tasks/{tid}/continue", json={"goal": "more"})
+            assert resp.status == 409
+
+            await _wait_for(lambda: task.status == TaskStatus.DONE)
+            first_steps = task.steps_taken
+
+            resp = await client.post(f"/tasks/{tid}/continue", json={"goal": "  "})
+            assert resp.status == 400
+            resp = await client.post(f"/tasks/{tid}/continue", json={"goal": "and now more"})
+            assert resp.status == 200
+            body = await resp.json()
+            assert body["goal"] == "and now more"
+            assert body["status"] in ("pending", "running")
+            assert body["result"] is None and body["finished_at"] is None
+
+            await _wait_for(lambda: task.status == TaskStatus.DONE)
+            assert task.result is not None
+            assert task.prior_steps == first_steps + 1
+
+            # Both runs landed in the same evidence trail, with step numbers
+            # offset so the follow-up's events sit after the first run's.
+            events = [json.loads(line) for line in
+                      (tmp_path / tid / "steps.jsonl").read_text().splitlines()]
+            starts = [e for e in events if e["kind"] == "start"]
+            assert [e["goal"] for e in starts] == ["stub", "and now more"]
+            finals = [e for e in events if e["kind"] == "final"]
+            assert len(finals) == 2
+            assert finals[1]["step"] > finals[0]["step"]
+
+    asyncio.run(inner())
+
+
+def test_run_log_base_offsets_events_and_screenshots(tmp_path):
+    log = RunLog("t1", root=tmp_path, base=40)
+    log.event(2, "action")
+    path = log.save_screenshot(2, TINY_PNG)
+    assert path.endswith("step_042.png")
+    record = json.loads((tmp_path / "t1" / "steps.jsonl").read_text())
+    assert record["step"] == 42

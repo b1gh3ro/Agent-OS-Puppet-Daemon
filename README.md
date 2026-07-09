@@ -85,6 +85,22 @@ curl -X POST localhost:8420/tasks/<id>/resume
 
 Note: the wall-clock timeout keeps ticking while paused.
 
+**Continuing a finished task.** A `done` task isn't a dead end — the agent
+keeps its whole conversation, so you can send a follow-up that builds on
+everything it already did and saw. In the dashboard the steer box turns into a
+**Continue** box once the task finishes; over HTTP:
+
+```bash
+curl -X POST localhost:8420/tasks/<id>/continue -H 'Content-Type: application/json' \
+  -d '{"goal": "Good — now reply to their last message too.", "max_steps": 30}'
+```
+
+The task re-queues with a fresh action budget (`max_steps` is optional and
+defaults to the previous one) and appends to the same `runs/<id>/` evidence
+trail. It also works on `failed` and `cancelled` tasks — the agent picks up
+from where it stopped. History lives in memory only: a daemon restart forgets
+it.
+
 ## Everyday commands
 
 ```bash

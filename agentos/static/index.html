@@ -318,8 +318,12 @@ function renderDetail() {
   $("btn-cancel").disabled = terminal || t.cancel_requested;
   $("btn-pause").disabled = terminal;
   $("btn-pause").textContent = (t.pause_requested || t.paused) ? "Resume" : "Pause";
-  $("btn-guide").disabled = terminal;
-  $("guidance-text").disabled = terminal;
+  // On a finished task the text box turns into a follow-up prompt: the run
+  // continues in the same session, with the model's history intact.
+  $("btn-guide").textContent = terminal ? "Continue" : "Send";
+  $("guidance-text").placeholder = terminal
+    ? "Continue the task: e.g. 'now also reply to their last message'"
+    : "Steer the agent: e.g. 'use the search bar instead'";
 }
 
 // ---- controls --------------------------------------------------------------
@@ -332,7 +336,12 @@ $("btn-pause").onclick = () => {
 async function sendGuidance() {
   const text = $("guidance-text").value.trim();
   if (!text) return;
-  await post(`/tasks/${state.selectedId}/guidance`, { text });
+  const t = state.tasks.find(x => x.id === state.selectedId);
+  if (t && TERMINAL.has(t.status)) {
+    await post(`/tasks/${state.selectedId}/continue`, { goal: text });
+  } else {
+    await post(`/tasks/${state.selectedId}/guidance`, { text });
+  }
   $("guidance-text").value = "";
   pollTasks();
 }

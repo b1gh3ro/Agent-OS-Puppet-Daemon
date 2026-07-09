@@ -28,7 +28,7 @@ from .sandbox import DockerSandbox, Sandbox, ensure_container
 log = logging.getLogger("agentos")
 
 
-_SCREENSHOT_NAME = re.compile(r"^step_\d{3}\.png$")
+_SCREENSHOT_NAME = re.compile(r"^step_\d{3,}\.png$")
 
 
 class Daemon:
@@ -51,7 +51,7 @@ class Daemon:
                 task.finished_at = time.time()
                 continue
             task.status = TaskStatus.RUNNING
-            run_log = RunLog(task.id, root=self.runs_root)
+            run_log = RunLog(task.id, root=self.runs_root, base=task.prior_steps)
             run_log.event(0, "start", goal=task.goal, worker=n)
             log.info("worker %d: task %s started: %s", n, task.id, task.goal)
             try:
@@ -140,6 +140,40 @@ class Daemon:
         task.guidance.append(text)
         return web.json_response(task.to_dict())
 
+    async def continue_task(self, request: web.Request) -> web.Response:
+        """Re-queue a finished task with a follow-up goal. The brain resumes
+        from the saved conversation, so the model keeps everything it did and
+        saw in the earlier run(s)."""
+        task = self.tasks.get(request.match_info["id"])
+        if not task:
+            raise web.HTTPNotFound(text="no such task")
+        if not task.is_terminal:
+            raise web.HTTPConflict(text="task is still running — steer it with /guidance")
+        try:
+            body = await request.json()
+        except Exception:
+            raise web.HTTPBadRequest(text="body must be JSON")
+        goal = (body.get("goal") or "").strip()
+        if not goal:
+            raise web.HTTPBadRequest(text='"goal" is required')
+        # Shift follow-up step numbers past this run's (+1 so its step-0
+        # screenshot doesn't overwrite the previous run's last one).
+        task.prior_steps += task.steps_taken + 1
+        task.steps_taken = 0
+        task.goal = goal
+        task.max_steps = int(body.get("max_steps", task.max_steps))
+        task.timeout_seconds = float(body.get("timeout_seconds", task.timeout_seconds))
+        task.status = TaskStatus.PENDING
+        task.result = None
+        task.error = None
+        task.finished_at = None
+        task.cancel_requested = False
+        task.pause_requested = False
+        task.wait_message = None
+        task.guidance.clear()
+        await self.queue.put(task)
+        return web.json_response(task.to_dict())
+
     async def get_steps(self, request: web.Request) -> web.Response:
         task = self.tasks.get(request.match_info["id"])
         if not task:
@@ -199,6 +233,7 @@ class Daemon:
         app.router.add_post("/tasks/{id}/pause", self.pause_task)
         app.router.add_post("/tasks/{id}/resume", self.resume_task)
         app.router.add_post("/tasks/{id}/guidance", self.post_guidance)
+        app.router.add_post("/tasks/{id}/continue", self.continue_task)
         app.router.add_get("/tasks/{id}/steps", self.get_steps)
         app.router.add_get("/runs/{id}/{name}", self.get_screenshot)
         app.router.add_get("/health", self.health)

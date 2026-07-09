@@ -37,6 +37,8 @@ class Task:
     paused: bool = False           # observed state, set/cleared only by the brain
     guidance: list[str] = field(default_factory=list)
     wait_message: str | None = None  # set when the agent itself asks the operator to act
+    prior_steps: int = 0     # steps consumed by earlier runs (offsets the run log)
+    history: list | None = None  # model conversation kept for follow-ups; never serialized
 
     @property
     def is_terminal(self) -> bool:
