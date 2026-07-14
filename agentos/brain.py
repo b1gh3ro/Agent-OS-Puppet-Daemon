@@ -186,7 +186,11 @@ _CUSTOM_TOOLS = [
             "the instant it changes, then hands you one fresh screenshot of the "
             "new state — so you wait exactly as long as needed and no longer. "
             "Prefer this over sleep() whenever the thing you're waiting for will "
-            "change the screen. If it returns 'changed': false it hit the timeout "
+            "change the screen. It wakes eagerly on ANY visible change, so the "
+            "wake may not be what you wanted (a 'typing...' indicator, a clock "
+            "tick, an unrelated chat lighting up): look at the screenshot, act if "
+            "it's relevant, and if it isn't just call wait_for_screen_change again "
+            "to keep waiting. If it returns 'changed': false it hit the timeout "
             "with no visible change. The operator can also skip the wait. (Use "
             "sleep() when what you're waiting for does NOT alter the display.)"
         ),
@@ -422,16 +426,18 @@ class GeminiBrain:
         return {"slept_seconds": round(min(elapsed, seconds), 1),
                 "woken_early": elapsed < seconds}
 
-    # Screen-change detection: compare small grayscale thumbnails. A pixel counts
-    # as changed if it shifts more than _CHANGE_PIXEL_DELTA (of 255); the frame
-    # counts as changed if more than _CHANGE_FRACTION of pixels do — enough to
-    # ignore a blinking caret or cursor but catch any real UI update.
-    _CHANGE_PIXEL_DELTA = 24
-    _CHANGE_FRACTION = 0.02
+    # Screen-change detection: compare grayscale thumbnails. A pixel counts as
+    # changed if it shifts more than _CHANGE_PIXEL_DELTA (of 255); the frame
+    # counts as changed if more than _CHANGE_FRACTION of pixels do. Tuned to be
+    # eager — a single new chat bubble should trip it — while still ignoring a
+    # blinking caret or mouse cursor (a few pixels). The model decides whether a
+    # wake actually matters and can just wait again if it doesn't.
+    _CHANGE_PIXEL_DELTA = 14
+    _CHANGE_FRACTION = 0.004
 
     @staticmethod
     def _signature(png: bytes) -> Image.Image:
-        return Image.open(io.BytesIO(png)).convert("L").resize((96, 64))
+        return Image.open(io.BytesIO(png)).convert("L").resize((240, 152))
 
     @classmethod
     def _frames_differ(cls, a: Image.Image, b: Image.Image) -> bool:
