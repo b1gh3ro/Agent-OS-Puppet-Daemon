@@ -36,8 +36,10 @@ class Task:
     cancel_requested: bool = False
     pause_requested: bool = False  # operator intent, set/cleared over HTTP
     paused: bool = False           # observed state, set/cleared only by the brain
+    wake_requested: bool = False   # operator asked to end the current wait/sleep early
     guidance: list[str] = field(default_factory=list)
     wait_message: str | None = None  # set when the agent itself asks the operator to act
+    wait_kind: str | None = None     # "user" (needs a human) or "sleep" (a timer) — drives the UI button
     prior_steps: int = 0     # steps consumed by earlier runs (offsets the run log)
     history: list | None = None  # model conversation kept for follow-ups; never serialized
 
@@ -62,4 +64,5 @@ class Task:
             "paused": self.paused,
             "pending_guidance": len(self.guidance),
             "wait_message": self.wait_message,
+            "wait_kind": self.wait_kind,
         }

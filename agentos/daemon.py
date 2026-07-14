@@ -148,7 +148,8 @@ class Daemon:
 
     async def resume_task(self, request: web.Request) -> web.Response:
         task = self._get_live_task(request)
-        task.pause_requested = False
+        task.pause_requested = False   # un-pause / release a wait_for_user
+        task.wake_requested = True     # ...and cut a running sleep short
         return web.json_response(task.to_dict())
 
     async def post_guidance(self, request: web.Request) -> web.Response:
@@ -192,7 +193,9 @@ class Daemon:
         task.finished_at = None
         task.cancel_requested = False
         task.pause_requested = False
+        task.wake_requested = False
         task.wait_message = None
+        task.wait_kind = None
         task.guidance.clear()
         await self.queue.put(task)
         return web.json_response(task.to_dict())

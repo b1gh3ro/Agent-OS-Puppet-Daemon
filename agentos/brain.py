@@ -146,9 +146,11 @@ _CUSTOM_TOOLS = [
             "build, a countdown, a scheduled event. This is the token-cheap way "
             "to wait: one call sleeps server-side for the whole duration, then "
             "returns a single fresh screenshot. The task deadline is pushed out "
-            "so a legitimately long sleep won't time the task out. Do NOT use it "
-            "as a substitute for wait_for_user (a human action) or for sub-15s "
-            "UI settling (use 'wait' for that)."
+            "so a legitimately long sleep won't time the task out. The operator "
+            "can cut the wait short at any time (you'll get 'woken_early': true "
+            "in the result, so check it rather than assuming the full time "
+            "passed). Do NOT use it as a substitute for wait_for_user (a human "
+            "action) or for sub-15s UI settling (use 'wait' for that)."
         ),
         "parameters": {
             "type": "object",
@@ -325,36 +327,54 @@ class GeminiBrain:
         resumes (reusing the same pause flag the Resume button flips)."""
         msg = str(args.get("message") or "Waiting for you to continue.").strip()
         task.wait_message = msg
+        task.wait_kind = "user"
         task.pause_requested = True
         log.event(step, "wait_for_user", message=msg)
         try:
             await pause_gate(task, log, step)  # blocks until Resume; raises on Cancel
         finally:
             task.wait_message = None
+            task.wait_kind = None
         return {"resumed": True, "note": "Operator resumed; screen reflects their changes."}
 
     @staticmethod
     async def _sleep(task: Task, args: dict, log: RunLog, step: int) -> dict:
         """Model-initiated timed wait: sleep server-side for up to an hour with
         no model round-trips, pushing the task deadline out so a long sleep does
-        not trip the daemon timeout. Cancellable and pausable at 1s granularity."""
+        not trip the daemon timeout. The operator can end it early by clicking
+        Resume (wake_requested); also cancellable at 1s granularity."""
         seconds = max(0.0, min(float(args.get("seconds", 60)), MAX_SLEEP_SECONDS))
+        reason = str(args.get("reason") or "").strip()
         # Extend the mutable wall-clock deadline (daemon polls it) and keep the
         # reported budget consistent, so waking up still leaves room to act.
         if task.deadline is not None:
             task.deadline = max(task.deadline,
                                 time.monotonic() + seconds + SLEEP_DEADLINE_MARGIN)
         task.timeout_seconds += seconds
-        log.event(step, "sleep", seconds=seconds, reason=args.get("reason"))
-        remaining = seconds
-        while remaining > 0:
-            if task.cancel_requested:
-                raise TaskCancelled()
-            await pause_gate(task, log, step)  # honor an operator pause mid-sleep
-            chunk = min(remaining, 1.0)
-            await asyncio.sleep(chunk)
-            remaining -= chunk
-        return {"slept_seconds": seconds}
+        # Surface a wait box so the operator can skip ahead; drop any stale wake
+        # from an earlier resume so this sleep doesn't end the instant it starts.
+        task.wake_requested = False
+        task.wait_kind = "sleep"
+        mins = f"{seconds / 60:.0f} min" if seconds >= 90 else f"{seconds:.0f}s"
+        task.wait_message = (f"Sleeping ~{mins}" + (f" ({reason})" if reason else "")
+                             + ". Click Resume to skip the wait and continue now.")
+        log.event(step, "sleep", seconds=seconds, reason=reason or None)
+        elapsed = 0.0
+        try:
+            while elapsed < seconds:
+                if task.cancel_requested:
+                    raise TaskCancelled()
+                if task.wake_requested:
+                    log.event(step, "sleep_woken", after=round(elapsed, 1))
+                    break
+                await asyncio.sleep(min(seconds - elapsed, 1.0))
+                elapsed += 1.0
+        finally:
+            task.wait_message = None
+            task.wait_kind = None
+            task.wake_requested = False
+        return {"slept_seconds": round(min(elapsed, seconds), 1),
+                "woken_early": elapsed < seconds}
 
     @staticmethod
     def _drain_guidance(task: Task, contents: list[types.Content],

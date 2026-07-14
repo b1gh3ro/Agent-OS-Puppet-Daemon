@@ -293,10 +293,14 @@ function renderDetail() {
 
   const wb = $("wait-banner");
   if (t.wait_message && !TERMINAL.has(t.status)) {
+    const sleeping = t.wait_kind === "sleep";
+    const title = sleeping ? "⏳ The agent is sleeping" : "⏸ The agent is waiting for you";
+    const label = sleeping ? "Skip the wait — continue now" : "I've done it — Resume";
     wb.classList.add("show");
-    wb.innerHTML = `<div class="title">⏸ The agent is waiting for you</div>
-      <div class="msg"></div><button id="wait-resume">I've done it — Resume</button>`;
+    wb.innerHTML = `<div class="title">${title}</div>
+      <div class="msg"></div><button id="wait-resume"></button>`;
     wb.querySelector(".msg").textContent = t.wait_message;
+    wb.querySelector("#wait-resume").textContent = label;
     wb.querySelector("#wait-resume").onclick =
       () => post(`/tasks/${t.id}/resume`).then(pollTasks);
   } else {
@@ -359,6 +363,8 @@ function evBody(e) {
     }
     case "guidance": return e.text;
     case "wait_for_user": return e.message;
+    case "sleep": return `sleeping ~${Math.round(e.seconds)}s${e.reason ? ` (${e.reason})` : ""}`;
+    case "sleep_woken": return `woken early after ${e.after}s`;
     case "action_result": {
       const out = (e.output || "").trim();
       return `exit ${e.exit_code}${out ? `\n${out}` : ""}`;
