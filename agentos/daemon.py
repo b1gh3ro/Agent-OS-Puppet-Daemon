@@ -19,6 +19,7 @@ from pathlib import Path
 
 from aiohttp import web
 from dotenv import load_dotenv
+from google.genai import types
 
 from .brain import GeminiBrain, StubBrain
 from .logs import RunLog
@@ -40,6 +41,7 @@ class Daemon:
         self.runs_root = Path(runs_root)
         self.queue: asyncio.Queue[Task] = asyncio.Queue()
         self.tasks: dict[str, Task] = {}
+        self._load_persisted()  # bring back finished tasks (with their memory) after a restart
 
     # -- worker loop ---------------------------------------------------------
 
@@ -70,6 +72,9 @@ class Daemon:
                 task.finished_at = time.time()
                 run_log.event(task.steps_taken, "final", status=task.status.value,
                               result=task.result, error=task.error)
+                # Save the task + its model conversation so a restart can pick up
+                # exactly where it left off (continue reuses task.history).
+                self._persist_task(task)
                 log.info("task %s finished: %s", task.id, task.status.value)
 
     async def _run_with_deadline(self, task: Task, run_log: RunLog) -> str | None:
@@ -97,6 +102,63 @@ class Daemon:
                     await runner
                 except (asyncio.CancelledError, Exception):
                     pass
+
+    # -- persistence ---------------------------------------------------------
+
+    _PERSIST_FIELDS = ("id", "goal", "result", "error", "steps_taken",
+                       "prior_steps", "max_steps", "timeout_seconds",
+                       "created_at", "finished_at")
+
+    def _persist_task(self, task: Task) -> None:
+        """Snapshot a finished task and its model conversation to its run dir.
+
+        history.json holds the exact Gemini contents (types.Content is pydantic),
+        so a reloaded task can be continued with its full memory intact."""
+        d = self.runs_root / task.id
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            meta = {k: getattr(task, k) for k in self._PERSIST_FIELDS}
+            meta["status"] = task.status.value
+            (d / "task.json").write_text(json.dumps(meta, default=str), encoding="utf-8")
+            if task.history is not None:
+                hist = [c.model_dump(mode="json") for c in task.history]
+                (d / "history.json").write_text(json.dumps(hist), encoding="utf-8")
+        except Exception:
+            log.exception("could not persist task %s", task.id)
+
+    def _load_persisted(self) -> None:
+        """Rebuild self.tasks from task.json snapshots left by earlier runs."""
+        if not self.runs_root.exists():
+            return
+        valid = {s.value for s in TaskStatus}
+        for meta_path in sorted(self.runs_root.glob("*/task.json")):
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except Exception:
+                log.exception("could not read %s", meta_path)
+                continue
+            task = Task(goal=meta.get("goal", ""), id=meta.get("id") or meta_path.parent.name)
+            for k in ("result", "error", "steps_taken", "prior_steps",
+                      "max_steps", "timeout_seconds", "created_at", "finished_at"):
+                if meta.get(k) is not None:
+                    setattr(task, k, meta[k])
+            status = meta.get("status", "done")
+            task.status = TaskStatus(status) if status in valid else TaskStatus.DONE
+            # A snapshot saved as running/pending means the daemon died mid-run;
+            # mark it terminal so the operator can still continue it.
+            if not task.is_terminal:
+                task.status = TaskStatus.FAILED
+                task.error = task.error or "daemon restarted while this task was running"
+            hist_path = meta_path.parent / "history.json"
+            if hist_path.exists():
+                try:
+                    raw = json.loads(hist_path.read_text(encoding="utf-8"))
+                    task.history = [types.Content.model_validate(c) for c in raw]
+                except Exception:
+                    log.exception("could not load history for %s", task.id)
+            self.tasks[task.id] = task
+        if self.tasks:
+            log.info("restored %d task(s) from %s", len(self.tasks), self.runs_root)
 
     # -- HTTP API ------------------------------------------------------------
 
