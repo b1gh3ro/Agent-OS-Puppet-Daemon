@@ -57,6 +57,14 @@ SYSTEM_HINT = (
     "launcher. You have a budget of {max_steps} actions for this task; each "
     "action result tells you how many remain — make sure you deliver your "
     "final answer before it runs out.\n"
+    "You can also issue SEVERAL actions in a single turn when they follow "
+    "predictably and none depends on seeing the result of the one before — e.g. "
+    "click a field, type text, then press Enter; or fire off several "
+    "run_command calls at once. They execute in order and you get ONE "
+    "screenshot after the last one, which saves round-trips. Split them back "
+    "into separate turns whenever you genuinely need to see the screen before "
+    "deciding the next move (a click that opens an unpredictable dialog, a "
+    "search whose results you must read).\n"
     "- sleep(seconds): idle for minutes up to an hour (a download, a build, a "
     "scheduled event) with no cost while you wait — one call sleeps the whole "
     "time and returns a single screenshot. Use this, not repeated 'wait' "
@@ -442,24 +450,26 @@ class GeminiBrain:
                 log.event(step, "done", result=text)
                 return text or "(model finished without a text answer)"
 
+            # The model may batch several actions in one turn (see SYSTEM_HINT).
+            # Run them in order, but capture just ONE screenshot for the whole
+            # batch — the intermediate states are the model's own to predict, and
+            # N screenshots per turn would undo the point of batching.
             response_parts: list[types.Part] = []
+            need_screenshot = False
             for fc in calls:
                 args = dict(fc.args or {})
                 log.event(step, "action", name=fc.name, args=args)
 
                 if fc.name in ("wait_for_user", "sleep"):
-                    # Block here (until Resume, or until the timer elapses),
-                    # then hand back one fresh screenshot — no polling round-trips.
+                    # Block here (until Resume, or until the timer elapses); the
+                    # trailing screenshot below shows whatever changed meanwhile.
                     payload: dict = await (
                         self._wait_for_user(task, args, log, step)
                         if fc.name == "wait_for_user"
                         else self._sleep(task, args, log, step))
-                    fr_parts = [types.FunctionResponsePart(inline_data=types.FunctionResponseBlob(
-                        mime_type="image/png", data=(png := await self._settled_screenshot(sandbox)),
-                    ))]
-                    log.event(step, "screenshot", path=log.save_screenshot(step, png))
+                    need_screenshot = True
                     response_parts.append(types.Part(function_response=types.FunctionResponse(
-                        name=fc.name, response=payload, parts=fr_parts)))
+                        name=fc.name, response=payload)))
                     continue
 
                 acknowledged = self._auto_acknowledge_safety(args, log, step)
@@ -476,24 +486,20 @@ class GeminiBrain:
                               output=payload["output"][:1000])
 
                 # A screenshot is the feedback for GUI actions, but pure noise
-                # (and a ~1s settle wait) after a shell command whose answer is
-                # text. Only capture one when the action is visual, or the model
-                # explicitly asked for it.
-                fr_parts = None
+                # after a shell command whose answer is text. Defer it to the end
+                # of the batch so several actions cost a single frame.
                 if self._wants_screenshot(fc.name, args):
-                    png = await self._settled_screenshot(sandbox)
-                    path = log.save_screenshot(step, png)
-                    log.event(step, "screenshot", path=path)
-                    fr_parts = [types.FunctionResponsePart(
-                        inline_data=types.FunctionResponseBlob(
-                            mime_type="image/png", data=png,
-                        )
-                    )]
+                    need_screenshot = True
                 response_parts.append(types.Part(
-                    function_response=types.FunctionResponse(
-                        name=fc.name, response=payload, parts=fr_parts,
-                    )
-                ))
+                    function_response=types.FunctionResponse(name=fc.name, response=payload)))
+
+            # One settle + one screenshot for the batch, hung off the last
+            # response so the model sees the final state after every action ran.
+            if need_screenshot:
+                png = await self._settled_screenshot(sandbox)
+                log.event(step, "screenshot", path=log.save_screenshot(step, png))
+                response_parts[-1].function_response.parts = [types.FunctionResponsePart(
+                    inline_data=types.FunctionResponseBlob(mime_type="image/png", data=png))]
 
             remaining = task.max_steps - step
             response_parts.append(types.Part(text=(
