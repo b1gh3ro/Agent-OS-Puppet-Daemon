@@ -15,7 +15,7 @@ import time
 
 from google import genai
 from google.genai import types
-from PIL import Image
+from PIL import Image, ImageChops
 
 from .logs import RunLog
 from .models import Task, TaskCancelled
@@ -69,6 +69,10 @@ SYSTEM_HINT = (
     "scheduled event) with no cost while you wait — one call sleeps the whole "
     "time and returns a single screenshot. Use this, not repeated 'wait' "
     "actions, whenever you must wait longer than ~15 seconds.\n"
+    "- wait_for_screen_change(timeout_seconds): when you're waiting for the "
+    "display to update but don't know how long it takes (a page loading, a "
+    "spinner, a dialog), use this instead of sleep — it returns the instant the "
+    "screen changes, so you wait exactly as long as needed and no longer.\n"
     "Complete this task, then answer in plain text with the outcome:\n\n{goal}"
 )
 
@@ -168,6 +172,32 @@ _CUSTOM_TOOLS = [
                 "reason": {"type": "string", "description": "One line: what you are waiting for."},
             },
             "required": ["seconds"],
+        },
+    },
+    {
+        "name": "wait_for_screen_change",
+        "description": (
+            "Block until the screen visibly changes from how it looks right now "
+            "(or a timeout), with NO model round-trips while waiting. This is the "
+            "smart way to wait when you don't know how long something takes but "
+            "you'll know it's done because the display updates: a page finishing "
+            "loading, a spinner resolving, a dialog appearing, a download that "
+            "refreshes the view. It watches the screen server-side and returns "
+            "the instant it changes, then hands you one fresh screenshot of the "
+            "new state — so you wait exactly as long as needed and no longer. "
+            "Prefer this over sleep() whenever the thing you're waiting for will "
+            "change the screen. If it returns 'changed': false it hit the timeout "
+            "with no visible change. The operator can also skip the wait. (Use "
+            "sleep() when what you're waiting for does NOT alter the display.)"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "timeout_seconds": {"type": "number", "description":
+                    "Give up after this many seconds if nothing changes (capped at 3600). Default 30."},
+                "reason": {"type": "string", "description": "One line: what update you are waiting for."},
+            },
+            "required": [],
         },
     },
 ]
@@ -346,26 +376,36 @@ class GeminiBrain:
         return {"resumed": True, "note": "Operator resumed; screen reflects their changes."}
 
     @staticmethod
-    async def _sleep(task: Task, args: dict, log: RunLog, step: int) -> dict:
-        """Model-initiated timed wait: sleep server-side for up to an hour with
-        no model round-trips, pushing the task deadline out so a long sleep does
-        not trip the daemon timeout. The operator can end it early by clicking
-        Resume (wake_requested); also cancellable at 1s granularity."""
-        seconds = max(0.0, min(float(args.get("seconds", 60)), MAX_SLEEP_SECONDS))
-        reason = str(args.get("reason") or "").strip()
-        # Extend the mutable wall-clock deadline (daemon polls it) and keep the
-        # reported budget consistent, so waking up still leaves room to act.
+    def _open_wait(task: Task, budget: float, message: str) -> None:
+        """Start an operator-skippable timed wait: push the mutable deadline out
+        so a long wait can't trip the daemon timeout, and raise a wait box (the
+        'sleep' kind renders a Skip button). Clearing wake_requested first drops
+        any stale skip from an earlier resume so the wait doesn't end instantly."""
         if task.deadline is not None:
             task.deadline = max(task.deadline,
-                                time.monotonic() + seconds + SLEEP_DEADLINE_MARGIN)
-        task.timeout_seconds += seconds
-        # Surface a wait box so the operator can skip ahead; drop any stale wake
-        # from an earlier resume so this sleep doesn't end the instant it starts.
+                                time.monotonic() + budget + SLEEP_DEADLINE_MARGIN)
+        task.timeout_seconds += budget
         task.wake_requested = False
         task.wait_kind = "sleep"
+        task.wait_message = message
+
+    @staticmethod
+    def _close_wait(task: Task) -> None:
+        task.wait_message = None
+        task.wait_kind = None
+        task.wake_requested = False
+
+    @staticmethod
+    async def _sleep(task: Task, args: dict, log: RunLog, step: int) -> dict:
+        """Model-initiated timed wait: sleep server-side for up to an hour with
+        no model round-trips. The operator can end it early by clicking Resume
+        (wake_requested); also cancellable at 1s granularity."""
+        seconds = max(0.0, min(float(args.get("seconds", 60)), MAX_SLEEP_SECONDS))
+        reason = str(args.get("reason") or "").strip()
         mins = f"{seconds / 60:.0f} min" if seconds >= 90 else f"{seconds:.0f}s"
-        task.wait_message = (f"Sleeping ~{mins}" + (f" ({reason})" if reason else "")
-                             + ". Click Resume to skip the wait and continue now.")
+        GeminiBrain._open_wait(task, seconds, f"Sleeping ~{mins}"
+                               + (f" ({reason})" if reason else "")
+                               + ". Click Resume to skip the wait and continue now.")
         log.event(step, "sleep", seconds=seconds, reason=reason or None)
         elapsed = 0.0
         try:
@@ -378,11 +418,63 @@ class GeminiBrain:
                 await asyncio.sleep(min(seconds - elapsed, 1.0))
                 elapsed += 1.0
         finally:
-            task.wait_message = None
-            task.wait_kind = None
-            task.wake_requested = False
+            GeminiBrain._close_wait(task)
         return {"slept_seconds": round(min(elapsed, seconds), 1),
                 "woken_early": elapsed < seconds}
+
+    # Screen-change detection: compare small grayscale thumbnails. A pixel counts
+    # as changed if it shifts more than _CHANGE_PIXEL_DELTA (of 255); the frame
+    # counts as changed if more than _CHANGE_FRACTION of pixels do — enough to
+    # ignore a blinking caret or cursor but catch any real UI update.
+    _CHANGE_PIXEL_DELTA = 24
+    _CHANGE_FRACTION = 0.02
+
+    @staticmethod
+    def _signature(png: bytes) -> Image.Image:
+        return Image.open(io.BytesIO(png)).convert("L").resize((96, 64))
+
+    @classmethod
+    def _frames_differ(cls, a: Image.Image, b: Image.Image) -> bool:
+        hist = ImageChops.difference(a, b).histogram()
+        changed = sum(hist[cls._CHANGE_PIXEL_DELTA + 1:])
+        return changed > cls._CHANGE_FRACTION * (a.width * a.height)
+
+    @staticmethod
+    async def _wait_for_change(task: Task, args: dict, sandbox: Sandbox,
+                               log: RunLog, step: int) -> dict:
+        """Block until the screen visibly changes from now (or a timeout), polling
+        server-side with no model round-trips. Returns as soon as a change is
+        seen; the batch's trailing screenshot then shows the model the new state.
+        Operator-skippable and cancellable."""
+        timeout = max(1.0, min(float(args.get("timeout_seconds", 30)), MAX_SLEEP_SECONDS))
+        reason = str(args.get("reason") or "").strip()
+        GeminiBrain._open_wait(task, timeout, f"Waiting up to {timeout:.0f}s for the "
+                               "screen to change" + (f" ({reason})" if reason else "")
+                               + ". Click Resume to continue now.")
+        baseline = GeminiBrain._signature(await sandbox.screenshot())
+        log.event(step, "wait_for_change", timeout=timeout, reason=reason or None)
+        elapsed = 0.0
+        changed = woken = False
+        try:
+            while elapsed < timeout:
+                if task.cancel_requested:
+                    raise TaskCancelled()
+                if task.wake_requested:
+                    woken = True
+                    log.event(step, "wait_woken", after=round(elapsed, 1))
+                    break
+                await asyncio.sleep(min(timeout - elapsed, 1.0))
+                elapsed += 1.0
+                if GeminiBrain._frames_differ(
+                        baseline, GeminiBrain._signature(await sandbox.screenshot())):
+                    changed = True
+                    log.event(step, "screen_changed", after=round(elapsed, 1))
+                    break
+        finally:
+            GeminiBrain._close_wait(task)
+        return {"changed": changed, "waited_seconds": round(min(elapsed, timeout), 1),
+                "timed_out": not changed and not woken,
+                "skipped_by_operator": woken}
 
     @staticmethod
     def _drain_guidance(task: Task, contents: list[types.Content],
@@ -460,13 +552,15 @@ class GeminiBrain:
                 args = dict(fc.args or {})
                 log.event(step, "action", name=fc.name, args=args)
 
-                if fc.name in ("wait_for_user", "sleep"):
-                    # Block here (until Resume, or until the timer elapses); the
+                if fc.name in ("wait_for_user", "sleep", "wait_for_screen_change"):
+                    # Block here (until Resume, a timer, or a screen change); the
                     # trailing screenshot below shows whatever changed meanwhile.
-                    payload: dict = await (
-                        self._wait_for_user(task, args, log, step)
-                        if fc.name == "wait_for_user"
-                        else self._sleep(task, args, log, step))
+                    if fc.name == "wait_for_user":
+                        payload: dict = await self._wait_for_user(task, args, log, step)
+                    elif fc.name == "sleep":
+                        payload = await self._sleep(task, args, log, step)
+                    else:
+                        payload = await self._wait_for_change(task, args, sandbox, log, step)
                     need_screenshot = True
                     response_parts.append(types.Part(function_response=types.FunctionResponse(
                         name=fc.name, response=payload)))

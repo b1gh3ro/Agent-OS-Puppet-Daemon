@@ -365,6 +365,9 @@ function evBody(e) {
     case "wait_for_user": return e.message;
     case "sleep": return `sleeping ~${Math.round(e.seconds)}s${e.reason ? ` (${e.reason})` : ""}`;
     case "sleep_woken": return `woken early after ${e.after}s`;
+    case "wait_for_change": return `waiting up to ${Math.round(e.timeout)}s for the screen to change${e.reason ? ` (${e.reason})` : ""}`;
+    case "screen_changed": return `screen changed after ${e.after}s`;
+    case "wait_woken": return `operator skipped the wait after ${e.after}s`;
     case "action_result": {
       const out = (e.output || "").trim();
       return `exit ${e.exit_code}${out ? `\n${out}` : ""}`;
