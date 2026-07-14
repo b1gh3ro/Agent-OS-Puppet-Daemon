@@ -30,6 +30,7 @@ class Task:
     steps_taken: int = 0
     max_steps: int = 300
     timeout_seconds: float = 3600.0
+    deadline: float | None = None  # monotonic wall-clock cutoff; mutable so a long sleep can push it out
     created_at: float = field(default_factory=time.time)
     finished_at: float | None = None
     cancel_requested: bool = False

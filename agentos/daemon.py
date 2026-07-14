@@ -55,10 +55,7 @@ class Daemon:
             run_log.event(0, "start", goal=task.goal, worker=n)
             log.info("worker %d: task %s started: %s", n, task.id, task.goal)
             try:
-                task.result = await asyncio.wait_for(
-                    self.brain.run_task(task, self.sandbox, run_log),
-                    timeout=task.timeout_seconds,
-                )
+                task.result = await self._run_with_deadline(task, run_log)
                 task.status = TaskStatus.DONE
             except TaskCancelled:
                 task.status = TaskStatus.CANCELLED
@@ -74,6 +71,32 @@ class Daemon:
                 run_log.event(task.steps_taken, "final", status=task.status.value,
                               result=task.result, error=task.error)
                 log.info("task %s finished: %s", task.id, task.status.value)
+
+    async def _run_with_deadline(self, task: Task, run_log: RunLog) -> str | None:
+        """Run the brain against a *mutable* wall-clock deadline.
+
+        asyncio.wait_for freezes its timeout at call time, so a long sleep
+        mid-task could never extend it. Instead we track task.deadline (a
+        monotonic cutoff the sleep tool can push out) and poll the runner
+        against it, cancelling only once the current deadline actually passes.
+        """
+        task.deadline = time.monotonic() + task.timeout_seconds
+        runner = asyncio.ensure_future(self.brain.run_task(task, self.sandbox, run_log))
+        try:
+            while True:
+                remaining = task.deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError
+                done, _ = await asyncio.wait({runner}, timeout=min(remaining, 30))
+                if runner in done:
+                    return runner.result()
+        finally:
+            if not runner.done():
+                runner.cancel()
+                try:
+                    await runner
+                except (asyncio.CancelledError, Exception):
+                    pass
 
     # -- HTTP API ------------------------------------------------------------
 

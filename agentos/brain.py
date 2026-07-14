@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import io
 import os
+import time
 
 from google import genai
 from google.genai import types
@@ -55,8 +56,12 @@ SYSTEM_HINT = (
     "empty, call open_app(command='firefox-esr') instead of hunting for a "
     "launcher. You have a budget of {max_steps} actions for this task; each "
     "action result tells you how many remain — make sure you deliver your "
-    "final answer before it runs out. Complete this task, then answer in "
-    "plain text with the outcome:\n\n{goal}"
+    "final answer before it runs out.\n"
+    "- sleep(seconds): idle for minutes up to an hour (a download, a build, a "
+    "scheduled event) with no cost while you wait — one call sleeps the whole "
+    "time and returns a single screenshot. Use this, not repeated 'wait' "
+    "actions, whenever you must wait longer than ~15 seconds.\n"
+    "Complete this task, then answer in plain text with the outcome:\n\n{goal}"
 )
 
 # Prepended instead of SYSTEM_HINT when the operator continues a finished
@@ -132,7 +137,35 @@ _CUSTOM_TOOLS = [
             "required": ["message"],
         },
     },
+    {
+        "name": "sleep",
+        "description": (
+            "Wait a long, fixed amount of time (up to 1 hour) with NO model "
+            "round-trips while it sleeps — use this instead of polling with the "
+            "short 'wait' action when you must idle for minutes: a download, a "
+            "build, a countdown, a scheduled event. This is the token-cheap way "
+            "to wait: one call sleeps server-side for the whole duration, then "
+            "returns a single fresh screenshot. The task deadline is pushed out "
+            "so a legitimately long sleep won't time the task out. Do NOT use it "
+            "as a substitute for wait_for_user (a human action) or for sub-15s "
+            "UI settling (use 'wait' for that)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "seconds": {"type": "number", "description":
+                    "How long to sleep, in seconds (capped at 3600). E.g. 1800 for 30 minutes."},
+                "reason": {"type": "string", "description": "One line: what you are waiting for."},
+            },
+            "required": ["seconds"],
+        },
+    },
 ]
+
+# Hard cap for a single sleep call, and how far past the sleep we push the
+# task deadline so waking up still leaves room to act.
+MAX_SLEEP_SECONDS = 3600.0
+SLEEP_DEADLINE_MARGIN = 60.0
 
 RUN_COMMAND_OUTPUT_LIMIT = 4000
 
@@ -161,8 +194,9 @@ async def pause_gate(task: Task, log: RunLog, step: int) -> None:
     """Per-step control gate: honor cancel, then block while pause is requested.
 
     Pause is cooperative — it only takes effect at step boundaries, and the
-    wait still burns the task's wall-clock timeout (asyncio.wait_for's
-    deadline in the daemon cannot be extended mid-flight).
+    wait still burns the task's wall-clock timeout (unlike sleep(), pausing
+    does not push task.deadline out, so a long pause can still time the task
+    out).
     """
     if task.cancel_requested:
         raise TaskCancelled()
@@ -300,6 +334,29 @@ class GeminiBrain:
         return {"resumed": True, "note": "Operator resumed; screen reflects their changes."}
 
     @staticmethod
+    async def _sleep(task: Task, args: dict, log: RunLog, step: int) -> dict:
+        """Model-initiated timed wait: sleep server-side for up to an hour with
+        no model round-trips, pushing the task deadline out so a long sleep does
+        not trip the daemon timeout. Cancellable and pausable at 1s granularity."""
+        seconds = max(0.0, min(float(args.get("seconds", 60)), MAX_SLEEP_SECONDS))
+        # Extend the mutable wall-clock deadline (daemon polls it) and keep the
+        # reported budget consistent, so waking up still leaves room to act.
+        if task.deadline is not None:
+            task.deadline = max(task.deadline,
+                                time.monotonic() + seconds + SLEEP_DEADLINE_MARGIN)
+        task.timeout_seconds += seconds
+        log.event(step, "sleep", seconds=seconds, reason=args.get("reason"))
+        remaining = seconds
+        while remaining > 0:
+            if task.cancel_requested:
+                raise TaskCancelled()
+            await pause_gate(task, log, step)  # honor an operator pause mid-sleep
+            chunk = min(remaining, 1.0)
+            await asyncio.sleep(chunk)
+            remaining -= chunk
+        return {"slept_seconds": seconds}
+
+    @staticmethod
     def _drain_guidance(task: Task, contents: list[types.Content],
                         log: RunLog, step: int) -> None:
         """Inject pending operator guidance as a user turn before the next call."""
@@ -370,10 +427,13 @@ class GeminiBrain:
                 args = dict(fc.args or {})
                 log.event(step, "action", name=fc.name, args=args)
 
-                if fc.name == "wait_for_user":
-                    # hand control to the
-                    # operator and block here until they resume.
-                    payload: dict = await self._wait_for_user(task, args, log, step)
+                if fc.name in ("wait_for_user", "sleep"):
+                    # Block here (until Resume, or until the timer elapses),
+                    # then hand back one fresh screenshot — no polling round-trips.
+                    payload: dict = await (
+                        self._wait_for_user(task, args, log, step)
+                        if fc.name == "wait_for_user"
+                        else self._sleep(task, args, log, step))
                     fr_parts = [types.FunctionResponsePart(inline_data=types.FunctionResponseBlob(
                         mime_type="image/png", data=(png := await self._settled_screenshot(sandbox)),
                     ))]
