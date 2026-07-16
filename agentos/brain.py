@@ -65,16 +65,68 @@ SYSTEM_HINT = (
     "into separate turns whenever you genuinely need to see the screen before "
     "deciding the next move (a click that opens an unpredictable dialog, a "
     "search whose results you must read).\n"
-    "- sleep(seconds): idle for minutes up to an hour (a download, a build, a "
-    "scheduled event) with no cost while you wait — one call sleeps the whole "
-    "time and returns a single screenshot. Use this, not repeated 'wait' "
-    "actions, whenever you must wait longer than ~15 seconds.\n"
-    "- wait_for_screen_change(timeout_seconds): when you're waiting for the "
-    "display to update but don't know how long it takes (a page loading, a "
-    "spinner, a dialog), use this instead of sleep — it returns the instant the "
-    "screen changes, so you wait exactly as long as needed and no longer.\n"
+    "{waiting}"
     "Complete this task, then answer in plain text with the outcome:\n\n{goal}"
 )
+
+# Waiting-primitive blurbs for SYSTEM_HINT, in two registers.
+#
+# `_WAIT_HINT` is the shipped production wording: it actively recommends the
+# event-driven primitive. `_WAIT_HINT_NEUTRAL` states mechanism only, with no
+# comparative advice and matched length, so neither primitive is favoured by
+# wording or verbosity. Controlled experiments MUST use the neutral register —
+# under the production wording, which primitive the model picks measures the
+# prompt, not the model. See GeminiBrain.__init__.
+_WAIT_HINT = {
+    "sleep": (
+        "- sleep(seconds): idle for minutes up to an hour (a download, a build, a "
+        "scheduled event) with no cost while you wait — one call sleeps the whole "
+        "time and returns a single screenshot. Use this, not repeated 'wait' "
+        "actions, whenever you must wait longer than ~15 seconds.\n"
+    ),
+    "wait_for_screen_change": (
+        "- wait_for_screen_change(timeout_seconds): when you're waiting for the "
+        "display to update but don't know how long it takes (a page loading, a "
+        "spinner, a dialog), use this instead of sleep — it returns the instant the "
+        "screen changes, so you wait exactly as long as needed and no longer.\n"
+    ),
+}
+_WAIT_HINT_NEUTRAL = {
+    "sleep": (
+        "- sleep(seconds): idle for a fixed duration you specify, up to an hour, "
+        "then return one fresh screenshot.\n"
+    ),
+    "wait_for_screen_change": (
+        "- wait_for_screen_change(timeout_seconds): idle until the screen differs "
+        "from now or the timeout elapses, then return one fresh screenshot.\n"
+    ),
+}
+
+# Neutral replacements for the `description` field of the waiting tools. The
+# shipped descriptions in _CUSTOM_TOOLS editorialise ("the smart way to wait",
+# "the token-cheap way", "Prefer this over sleep()"); these state mechanism and
+# failure modes only, at matched length.
+_NEUTRAL_TOOL_DESCRIPTION = {
+    "sleep": (
+        "Idle for a fixed number of seconds, up to 1 hour, with no model "
+        "round-trips while idling. One call blocks server-side for the requested "
+        "duration and then returns a single fresh screenshot. The duration is "
+        "fixed at call time and does not adapt to what happens on screen. The "
+        "task deadline is extended so the wait does not time the task out. The "
+        "operator can end the wait early, in which case the result carries "
+        "'woken_early': true and less time passed than requested."
+    ),
+    "wait_for_screen_change": (
+        "Idle until the screen differs from how it looks now, or until a timeout "
+        "elapses (up to 1 hour, default 30s), with no model round-trips while "
+        "idling. One call compares the screen server-side and returns on the "
+        "first difference it detects, then returns a single fresh screenshot. "
+        "Any visible difference counts, including changes unrelated to your task "
+        "(a clock tick, an unrelated window). A result of 'changed': false means "
+        "the timeout elapsed with no difference detected. The operator can end "
+        "the wait early."
+    ),
+}
 
 # Prepended instead of SYSTEM_HINT when the operator continues a finished
 # task: the model already carries the session in its history.
@@ -280,10 +332,55 @@ class StubBrain:
 
 
 class GeminiBrain:
-    def __init__(self, model: str | None = None):
+    #: Waiting primitives, keyed by strategy name. Experiments expose exactly one
+    #: of these at a time (see `waiting_tools`); production exposes all three.
+    WAITING_TOOLS = ("sleep", "wait_for_screen_change")
+
+    def __init__(self, model: str | None = None,
+                 waiting_tools: tuple[str, ...] | None = None):
+        """`waiting_tools` selects which waiting primitives the model may see.
+
+        None (default) is production: expose every primitive, described in the
+        shipped wording that recommends the event-driven one.
+
+        Passing a tuple is experiment mode: expose only the named primitives AND
+        switch to neutral wording for both the tool descriptions and the system
+        prompt. Both changes are needed. Comparing waiting strategies by asking
+        the model to adopt one measures instruction-following, not the strategy
+        — the shipped prompt and tool descriptions both push toward
+        `wait_for_screen_change`, which is why the deployment's 359:7 split is
+        not evidence of a preference. Ablation removes the choice instead of
+        biasing it.
+
+            waiting_tools=()                    -> polling only (built-in `wait`)
+            waiting_tools=("sleep",)            -> fixed server-side wait only
+            waiting_tools=("wait_for_screen_change",)  -> event-driven only
+            waiting_tools=WAITING_TOOLS         -> both, neutrally described
+                                                   (for studying free choice)
+        """
         self.client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
         self._models = [model] if model else list(MODEL_CANDIDATES)
         self._environment = self._pick_environment()
+        if waiting_tools is not None:
+            unknown = set(waiting_tools) - set(self.WAITING_TOOLS)
+            if unknown:
+                raise ValueError(f"unknown waiting tools: {sorted(unknown)}")
+        self._waiting_tools = waiting_tools
+        self._tools = [
+            t if waiting_tools is None or t["name"] not in _NEUTRAL_TOOL_DESCRIPTION
+            else {**t, "description": _NEUTRAL_TOOL_DESCRIPTION[t["name"]]}
+            for t in _CUSTOM_TOOLS
+            if waiting_tools is None
+            or t["name"] not in self.WAITING_TOOLS
+            or t["name"] in waiting_tools
+        ]
+
+    def _waiting_hint(self) -> str:
+        """The SYSTEM_HINT paragraphs describing the exposed waiting primitives."""
+        names = (self.WAITING_TOOLS if self._waiting_tools is None
+                 else self._waiting_tools)
+        table = _WAIT_HINT if self._waiting_tools is None else _WAIT_HINT_NEUTRAL
+        return "".join(table[n] for n in self.WAITING_TOOLS if n in names)
 
     @staticmethod
     def _pick_environment():
@@ -312,7 +409,7 @@ class GeminiBrain:
                     environment=self._environment,
                     enable_prompt_injection_detection=True,
                 )),
-                types.Tool(function_declarations=_CUSTOM_TOOLS),
+                types.Tool(function_declarations=self._tools),
             ],
             safety_settings=self._safety_settings(),
         )
@@ -538,7 +635,8 @@ class GeminiBrain:
         contents: list[types.Content] = task.history or []
         contents.append(types.Content(role="user", parts=[
             types.Part(text=hint.format(w=sandbox.width, h=sandbox.height,
-                                        goal=task.goal, max_steps=task.max_steps)),
+                                        goal=task.goal, max_steps=task.max_steps,
+                                        waiting=self._waiting_hint())),
             types.Part.from_bytes(data=png, mime_type="image/png"),
         ]))
         try:

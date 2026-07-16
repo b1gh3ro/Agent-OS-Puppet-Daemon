@@ -19,7 +19,13 @@ class RunLog:
         self.base = base
 
     def event(self, step: int, kind: str, **data) -> None:
-        record = {"ts": time.time(), "step": self.base + step, "kind": kind, **data}
+        # `ts` is wall-clock and is for humans reading the log only: the host can
+        # suspend, which makes differences between `ts` values meaningless as
+        # durations (measured 2026-07-16: suspend inflated total logged span by
+        # 54%). `mono` comes from a monotonic clock that does not jump, so it is
+        # the only field durations and latencies may be computed from.
+        record = {"ts": time.time(), "mono": time.monotonic(),
+                  "step": self.base + step, "kind": kind, **data}
         with self._jsonl.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
 
