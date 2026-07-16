@@ -317,21 +317,54 @@ class GeminiBrain:
             safety_settings=self._safety_settings(),
         )
 
-    async def _generate(self, contents):
-        """Call the model, falling back through MODEL_CANDIDATES once."""
+    @staticmethod
+    def _usage_fields(response) -> dict:
+        """Per-call token accounting. Cached and uncached prompt tokens are
+        reported separately: Gemini implicitly caches the repeated prefix, so a
+        poll costs far less than its raw prompt size suggests, and collapsing
+        the two hides that. `uncached_prompt_tokens` is the part a poll actually
+        pays for — mostly the new screenshot."""
+        usage = getattr(response, "usage_metadata", None)
+        if usage is None:
+            return {}
+        prompt = getattr(usage, "prompt_token_count", None) or 0
+        cached = getattr(usage, "cached_content_token_count", None) or 0
+        return {
+            "prompt_tokens": prompt,
+            "cached_tokens": cached,
+            "uncached_prompt_tokens": max(prompt - cached, 0),
+            "output_tokens": getattr(usage, "candidates_token_count", None) or 0,
+            "thoughts_tokens": getattr(usage, "thoughts_token_count", None) or 0,
+            "tool_use_prompt_tokens": getattr(usage, "tool_use_prompt_token_count", None) or 0,
+            "total_tokens": getattr(usage, "total_token_count", None) or 0,
+        }
+
+    async def _generate(self, contents, log: RunLog | None = None, step: int = 0):
+        """Call the model, falling back through MODEL_CANDIDATES once.
+
+        Every model call in the system funnels through here, so this is where
+        cost is measured: one `model_call` event per round-trip, carrying token
+        counts and wall-clock latency. Model *calls* and latency are the metrics
+        that caching cannot deflate, so they are recorded alongside tokens."""
         last_error: Exception | None = None
         for model in list(self._models):
+            started = time.perf_counter()
             try:
                 response = await self.client.aio.models.generate_content(
                     model=model, contents=contents, config=self._config(),
                 )
-                self._models = [model]  
-                return response
-            except Exception as e:  
+            except Exception as e:
                 last_error = e
                 message = str(e).lower()
                 if not any(hint in message for hint in ("not found", "not supported", "invalid model", "404")):
                     raise
+                continue
+            self._models = [model]
+            if log is not None:
+                log.event(step, "model_call", model=model,
+                          latency_s=round(time.perf_counter() - started, 3),
+                          **self._usage_fields(response))
+            return response
         raise last_error  # type: ignore[misc]
 
     _TEXT_ONLY_ACTIONS = {"run_command"}
@@ -523,7 +556,7 @@ class GeminiBrain:
             self._drain_guidance(task, contents, log, step)
             task.steps_taken = step
 
-            response = await self._generate(contents)
+            response = await self._generate(contents, log, step)
             candidate = response.candidates[0] if response.candidates else None
             if candidate is None or candidate.content is None:
                 # Filtered/empty responses happen; nudge instead of crashing.
@@ -616,7 +649,7 @@ class GeminiBrain:
             "Based on everything you have seen so far, give your best final answer "
             "to the task in plain text now."
         ))]))
-        response = await self._generate(contents)
+        response = await self._generate(contents, log, task.max_steps)
         candidates = response.candidates or []
         parts = (candidates[0].content.parts if candidates and candidates[0].content else None) or []
         text = "".join(p.text or "" for p in parts if p.text).strip()
