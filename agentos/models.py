@@ -24,6 +24,7 @@ class TaskStatus(StrEnum):
 class Task:
     goal: str
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
+    instructions: str = ""   # per-job standing rules; injected as system_instruction, editable mid-run to permanently steer
     status: TaskStatus = TaskStatus.PENDING
     result: str | None = None
     error: str | None = None
@@ -51,6 +52,7 @@ class Task:
         return {
             "id": self.id,
             "goal": self.goal,
+            "instructions": self.instructions,
             "status": self.status.value,
             "result": self.result,
             "error": self.error,

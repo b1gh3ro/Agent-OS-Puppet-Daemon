@@ -43,6 +43,18 @@ SYSTEM_HINT = (
     "actually need to see the screen, call take_screenshot (or pass "
     "screenshot=true to run_command); don't waste actions screenshotting "
     "after pure shell work.\n"
+    "  PREFER THE COMMAND LINE. For creating, editing, converting, or reading "
+    "files and documents — PDFs, images, spreadsheets, archives, data — a CLI "
+    "tool is faster and far more reliable than clicking through a GUI app; reach "
+    "for run_command first and only fall back to the GUI when a task genuinely "
+    "needs the visual app. The sandbox starts minimal: if the tool you want "
+    "isn't there, INSTALL IT — 'sudo apt-get install -y <pkg>' for system "
+    "packages, or 'pip install --break-system-packages <pkg>' for Python "
+    "libraries — then use it. E.g. to build or edit a PDF: pandoc, "
+    "wkhtmltopdf, weasyprint or LibreOffice ('soffice --headless --convert-to "
+    "pdf') to create one; qpdf, pdftk, ghostscript or poppler-utils (pdftotext, "
+    "pdfimages) to split/merge/read/edit one; img2pdf or ImageMagick for "
+    "images. Check a tool exists with 'which <tool>' and install it if not.\n"
     "- open_app(command): launch a GUI program detached, e.g. "
     "open_app(command='firefox-esr') or open_app(command='xterm').\n"
     "- wait_for_user(message): when you hit something only the human can do "
@@ -393,21 +405,29 @@ class GeminiBrain:
     @staticmethod
     def _safety_settings() -> list[types.SafetySetting]:
         """Default thresholds nondeterministically block benign computer-use
-        turns (BlockedReason.SAFETY on 'play music on spotify');"""
+        turns (BlockedReason.SAFETY on 'play music on spotify', or on an
+        innocuous chat screenshot). Use OFF, not BLOCK_NONE: on Gemini 2.5/3.x
+        OFF fully disables the configurable filter, while BLOCK_NONE still runs
+        it and can emit a prompt-level block (prompt_feedback.block_reason=SAFETY
+        with no safety_ratings), which is exactly the empty-turn we kept hitting.
+        Fall back to BLOCK_NONE only if a model's SDK lacks OFF."""
+        threshold = getattr(types.HarmBlockThreshold, "OFF",
+                            types.HarmBlockThreshold.BLOCK_NONE)
         names = ("HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH",
                  "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT",
                  "HARM_CATEGORY_CIVIC_INTEGRITY")
         return [
             types.SafetySetting(category=getattr(types.HarmCategory, name),
-                                threshold=types.HarmBlockThreshold.BLOCK_NONE)
+                                threshold=threshold)
             for name in names if hasattr(types.HarmCategory, name)
         ]
 
-    def _config(self) -> types.GenerateContentConfig:
-        # Read the operator's standing instructions fresh on every call so an
-        # edit lands on the next step, even mid-task. Sent as system_instruction
-        # (re-sent each round-trip, kept out of the scrolling conversation) so
-        # the model never forgets them however long the task runs.
+    def _config(self, instructions: str | None = None) -> types.GenerateContentConfig:
+        # The job's standing instructions ride in system_instruction (re-sent
+        # every round-trip, kept out of the scrolling conversation) so the model
+        # never forgets them however long the task runs. The loop passes the
+        # task's current value on every step, so an edit mid-run steers the very
+        # next call.
         return types.GenerateContentConfig(
             tools=[
                 types.Tool(computer_use=types.ComputerUse(
@@ -417,7 +437,7 @@ class GeminiBrain:
                 types.Tool(function_declarations=self._tools),
             ],
             safety_settings=self._safety_settings(),
-            system_instruction=system_instruction(),
+            system_instruction=system_instruction(instructions),
         )
 
     @staticmethod
@@ -442,7 +462,8 @@ class GeminiBrain:
             "total_tokens": getattr(usage, "total_token_count", None) or 0,
         }
 
-    async def _generate(self, contents, log: RunLog | None = None, step: int = 0):
+    async def _generate(self, contents, log: RunLog | None = None, step: int = 0,
+                        instructions: str | None = None):
         """Call the model, falling back through MODEL_CANDIDATES once.
 
         Every model call in the system funnels through here, so this is where
@@ -454,7 +475,8 @@ class GeminiBrain:
             started = time.perf_counter()
             try:
                 response = await self.client.aio.models.generate_content(
-                    model=model, contents=contents, config=self._config(),
+                    model=model, contents=contents,
+                    config=self._config(instructions),
                 )
             except Exception as e:
                 last_error = e
@@ -660,7 +682,7 @@ class GeminiBrain:
             self._drain_guidance(task, contents, log, step)
             task.steps_taken = step
 
-            response = await self._generate(contents, log, step)
+            response = await self._generate(contents, log, step, task.instructions)
             candidate = response.candidates[0] if response.candidates else None
             if candidate is None or candidate.content is None:
                 # Filtered/empty responses happen; nudge instead of crashing.
@@ -753,7 +775,7 @@ class GeminiBrain:
             "Based on everything you have seen so far, give your best final answer "
             "to the task in plain text now."
         ))]))
-        response = await self._generate(contents, log, task.max_steps)
+        response = await self._generate(contents, log, task.max_steps, task.instructions)
         candidates = response.candidates or []
         parts = (candidates[0].content.parts if candidates and candidates[0].content else None) or []
         text = "".join(p.text or "" for p in parts if p.text).strip()

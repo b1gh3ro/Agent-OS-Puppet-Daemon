@@ -22,7 +22,6 @@ from dotenv import load_dotenv
 from google.genai import types
 
 from .brain import GeminiBrain, StubBrain
-from .instructions import get_instructions, set_instructions
 from .logs import RunLog
 from .models import Task, TaskCancelled, TaskStatus
 from .sandbox import DockerSandbox, Sandbox, ensure_container
@@ -106,9 +105,9 @@ class Daemon:
 
     # -- persistence ---------------------------------------------------------
 
-    _PERSIST_FIELDS = ("id", "goal", "result", "error", "steps_taken",
-                       "prior_steps", "max_steps", "timeout_seconds",
-                       "created_at", "finished_at")
+    _PERSIST_FIELDS = ("id", "goal", "instructions", "result", "error",
+                       "steps_taken", "prior_steps", "max_steps",
+                       "timeout_seconds", "created_at", "finished_at")
 
     def _persist_task(self, task: Task) -> None:
         """Snapshot a finished task and its model conversation to its run dir.
@@ -139,8 +138,9 @@ class Daemon:
                 log.exception("could not read %s", meta_path)
                 continue
             task = Task(goal=meta.get("goal", ""), id=meta.get("id") or meta_path.parent.name)
-            for k in ("result", "error", "steps_taken", "prior_steps",
-                      "max_steps", "timeout_seconds", "created_at", "finished_at"):
+            for k in ("instructions", "result", "error", "steps_taken",
+                      "prior_steps", "max_steps", "timeout_seconds",
+                      "created_at", "finished_at"):
                 if meta.get(k) is not None:
                     setattr(task, k, meta[k])
             status = meta.get("status", "done")
@@ -173,6 +173,7 @@ class Daemon:
             raise web.HTTPBadRequest(text='"goal" is required')
         task = Task(
             goal=goal,
+            instructions=(body.get("instructions") or "").strip(),
             max_steps=int(body.get("max_steps", 300)),
             timeout_seconds=float(body.get("timeout_seconds", 3600)),
         )
@@ -305,17 +306,20 @@ class Daemon:
             headers={"Cache-Control": "no-cache"},
         )
 
-    async def get_instructions(self, request: web.Request) -> web.Response:
-        return web.json_response({"instructions": get_instructions()})
-
-    async def put_instructions(self, request: web.Request) -> web.Response:
+    async def put_task_instructions(self, request: web.Request) -> web.Response:
+        """Set/replace a job's standing instructions. Takes effect on the job's
+        next step (the brain reads task.instructions fresh each call), so editing
+        a running job permanently steers it from here on."""
+        task = self.tasks.get(request.match_info["id"])
+        if not task:
+            raise web.HTTPNotFound(text="no such task")
         try:
             body = await request.json()
         except Exception:
             raise web.HTTPBadRequest(text="body must be JSON")
-        text = set_instructions(body.get("instructions", ""))
-        log.info("standing instructions updated (%d chars)", len(text))
-        return web.json_response({"instructions": text})
+        task.instructions = (body.get("instructions") or "").strip()
+        log.info("task %s instructions updated (%d chars)", task.id, len(task.instructions))
+        return web.json_response(task.to_dict())
 
     async def health(self, request: web.Request) -> web.Response:
         return web.json_response({
@@ -337,8 +341,7 @@ class Daemon:
         app.router.add_post("/tasks/{id}/continue", self.continue_task)
         app.router.add_get("/tasks/{id}/steps", self.get_steps)
         app.router.add_get("/runs/{id}/{name}", self.get_screenshot)
-        app.router.add_get("/instructions", self.get_instructions)
-        app.router.add_put("/instructions", self.put_instructions)
+        app.router.add_put("/tasks/{id}/instructions", self.put_task_instructions)
         app.router.add_get("/health", self.health)
         app.router.add_get("/", self.index)
 
