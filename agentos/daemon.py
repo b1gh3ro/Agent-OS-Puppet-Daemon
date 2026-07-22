@@ -22,6 +22,7 @@ from dotenv import load_dotenv
 from google.genai import types
 
 from .brain import GeminiBrain, StubBrain
+from .instructions import get_instructions, set_instructions
 from .logs import RunLog
 from .models import Task, TaskCancelled, TaskStatus
 from .sandbox import DockerSandbox, Sandbox, ensure_container
@@ -304,6 +305,18 @@ class Daemon:
             headers={"Cache-Control": "no-cache"},
         )
 
+    async def get_instructions(self, request: web.Request) -> web.Response:
+        return web.json_response({"instructions": get_instructions()})
+
+    async def put_instructions(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            raise web.HTTPBadRequest(text="body must be JSON")
+        text = set_instructions(body.get("instructions", ""))
+        log.info("standing instructions updated (%d chars)", len(text))
+        return web.json_response({"instructions": text})
+
     async def health(self, request: web.Request) -> web.Response:
         return web.json_response({
             "ok": True,
@@ -324,6 +337,8 @@ class Daemon:
         app.router.add_post("/tasks/{id}/continue", self.continue_task)
         app.router.add_get("/tasks/{id}/steps", self.get_steps)
         app.router.add_get("/runs/{id}/{name}", self.get_screenshot)
+        app.router.add_get("/instructions", self.get_instructions)
+        app.router.add_put("/instructions", self.put_instructions)
         app.router.add_get("/health", self.health)
         app.router.add_get("/", self.index)
 
@@ -346,7 +361,13 @@ def make_brain(kind: str):
     if not os.getenv("GEMINI_API_KEY"):
         log.warning("GEMINI_API_KEY not set — falling back to stub brain")
         return StubBrain(steps=stub_steps)
-    return GeminiBrain(model=os.getenv("AGENT_MODEL") or None)
+    # Expose BOTH waiting primitives with neutral, matched-length wording so the
+    # model picks sleep vs wait_for_screen_change on the task's merits, not
+    # because the prompt or tool text steers it. (The biased production wording
+    # remains available via waiting_tools=None for the deliberate A/B, but the
+    # live daemon runs unbiased.)
+    return GeminiBrain(model=os.getenv("AGENT_MODEL") or None,
+                       waiting_tools=GeminiBrain.WAITING_TOOLS)
 
 
 async def main() -> None:

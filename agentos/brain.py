@@ -17,6 +17,7 @@ from google import genai
 from google.genai import types
 from PIL import Image, ImageChops
 
+from .instructions import system_instruction
 from .logs import RunLog
 from .models import Task, TaskCancelled
 from .sandbox import Sandbox
@@ -403,6 +404,10 @@ class GeminiBrain:
         ]
 
     def _config(self) -> types.GenerateContentConfig:
+        # Read the operator's standing instructions fresh on every call so an
+        # edit lands on the next step, even mid-task. Sent as system_instruction
+        # (re-sent each round-trip, kept out of the scrolling conversation) so
+        # the model never forgets them however long the task runs.
         return types.GenerateContentConfig(
             tools=[
                 types.Tool(computer_use=types.ComputerUse(
@@ -412,6 +417,7 @@ class GeminiBrain:
                 types.Tool(function_declarations=self._tools),
             ],
             safety_settings=self._safety_settings(),
+            system_instruction=system_instruction(),
         )
 
     @staticmethod

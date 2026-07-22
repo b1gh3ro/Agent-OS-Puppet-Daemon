@@ -5,3 +5,4 @@ __pycache__/
 .env
 runs/
 resume.tex
+general_instructions.txt
