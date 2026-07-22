@@ -216,7 +216,9 @@
 </main>
 
 <script>
-const NOVNC_URL = "http://localhost:6080/vnc.html?autoconnect=1&resize=scale";
+// Same-origin: the daemon proxies the sandbox's noVNC at /desktop, so the live
+// desktop reaches a phone over the one port the dashboard is already on.
+const NOVNC_URL = "/desktop/vnc.html?autoconnect=1&resize=scale&path=desktop/websockify";
 const TERMINAL = new Set(["done", "failed", "cancelled"]);
 const state = { selectedId: null, cursor: 0, tasks: [], lastShot: null, stick: true };
 const $ = id => document.getElementById(id);

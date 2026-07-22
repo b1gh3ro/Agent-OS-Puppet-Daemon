@@ -17,6 +17,7 @@ import re
 import time
 from pathlib import Path
 
+import aiohttp
 from aiohttp import web
 from dotenv import load_dotenv
 from google.genai import types
@@ -34,14 +35,24 @@ _SCREENSHOT_NAME = re.compile(r"^step_\d{3,}\.png$")
 
 class Daemon:
     def __init__(self, brain, sandbox: Sandbox, workers: int = 1,
-                 runs_root: str | Path = "runs"):
+                 runs_root: str | Path = "runs", token: str = "",
+                 novnc_port: int = 6080):
         self.brain = brain
         self.sandbox = sandbox
         self.workers = workers
         self.runs_root = Path(runs_root)
+        self.token = token.strip()          # if set, every request must present it (remote access)
+        self.novnc_port = novnc_port        # sandbox's noVNC server, proxied through us at /desktop
+        self._session: aiohttp.ClientSession | None = None
         self.queue: asyncio.Queue[Task] = asyncio.Queue()
         self.tasks: dict[str, Task] = {}
         self._load_persisted()  # bring back finished tasks (with their memory) after a restart
+
+    def _client(self) -> aiohttp.ClientSession:
+        """Lazily-created client session for proxying the live desktop."""
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession()
+        return self._session
 
     # -- worker loop ---------------------------------------------------------
 
@@ -306,6 +317,78 @@ class Daemon:
             headers={"Cache-Control": "no-cache"},
         )
 
+    # -- auth + live-desktop proxy (for remote access over one port) ----------
+
+    def _auth_middleware(self):
+        """Gate every request behind self.token when one is set. The token may
+        arrive as an X-Agent-Key header, a ?key= query param (bookmark it once),
+        or the agent_key cookie we drop after a successful ?key= — so the phone
+        types the URL with ?key=... a single time and everything after it,
+        including the noVNC iframe and its websocket, rides the cookie."""
+        token = self.token
+
+        @web.middleware
+        async def mw(request: web.Request, handler):
+            if token not in (request.headers.get("X-Agent-Key"),
+                             request.query.get("key"),
+                             request.cookies.get("agent_key")):
+                raise web.HTTPUnauthorized(
+                    text="missing or bad key — open this URL once with ?key=YOUR_TOKEN")
+            response = await handler(request)
+            if request.cookies.get("agent_key") != token and hasattr(response, "set_cookie"):
+                response.set_cookie("agent_key", token, httponly=True,
+                                    samesite="Lax", max_age=31536000)
+            return response
+
+        return mw
+
+    async def desktop_root(self, request: web.Request) -> web.Response:
+        # /desktop -> the noVNC client, told to open its websocket back through us.
+        raise web.HTTPFound("/desktop/vnc.html?autoconnect=1&resize=scale&path=desktop/websockify")
+
+    async def desktop_ws(self, request: web.Request) -> web.StreamResponse:
+        """Proxy the noVNC websocket to the sandbox's websockify, so the live
+        desktop reaches the phone over the same single port as the dashboard."""
+        requested = request.headers.get("Sec-WebSocket-Protocol")
+        protocols = tuple(p.strip() for p in requested.split(",")) if requested else ()
+        server = web.WebSocketResponse(protocols=protocols)
+        await server.prepare(request)
+        url = f"http://127.0.0.1:{self.novnc_port}/websockify"
+        try:
+            async with self._client().ws_connect(url, protocols=protocols) as client:
+                async def pump(src, dst, send_bytes, send_str):
+                    async for msg in src:
+                        if msg.type == aiohttp.WSMsgType.BINARY:
+                            await send_bytes(msg.data)
+                        elif msg.type == aiohttp.WSMsgType.TEXT:
+                            await send_str(msg.data)
+                        elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING):
+                            break
+                    await dst.close()
+                await asyncio.gather(
+                    pump(server, client, client.send_bytes, client.send_str),
+                    pump(client, server, server.send_bytes, server.send_str),
+                )
+        except Exception:
+            if not server.closed:
+                await server.close()
+        return server
+
+    async def desktop_http(self, request: web.Request) -> web.Response:
+        """Proxy noVNC's static assets (vnc.html and its core/app JS/CSS)."""
+        tail = request.match_info.get("tail") or "vnc.html"
+        url = f"http://127.0.0.1:{self.novnc_port}/{tail}"
+        try:
+            async with self._client().get(url, params=request.query) as upstream:
+                body = await upstream.read()
+                return web.Response(
+                    body=body, status=upstream.status,
+                    content_type=upstream.headers.get(
+                        "Content-Type", "application/octet-stream").split(";")[0],
+                )
+        except aiohttp.ClientError as e:
+            raise web.HTTPBadGateway(text=f"live desktop unreachable: {e}")
+
     async def put_task_instructions(self, request: web.Request) -> web.Response:
         """Set/replace a job's standing instructions. Takes effect on the job's
         next step (the brain reads task.instructions fresh each call), so editing
@@ -330,7 +413,10 @@ class Daemon:
         })
 
     def build_app(self) -> web.Application:
-        app = web.Application()
+        # A token gates the whole app (for remote/Tailscale access); with no
+        # token the daemon stays open, as it is for purely-local use.
+        middlewares = [self._auth_middleware()] if self.token else []
+        app = web.Application(middlewares=middlewares)
         app.router.add_post("/tasks", self.post_task)
         app.router.add_get("/tasks", self.get_tasks)
         app.router.add_get("/tasks/{id}", self.get_task)
@@ -342,6 +428,9 @@ class Daemon:
         app.router.add_get("/tasks/{id}/steps", self.get_steps)
         app.router.add_get("/runs/{id}/{name}", self.get_screenshot)
         app.router.add_put("/tasks/{id}/instructions", self.put_task_instructions)
+        app.router.add_get("/desktop/websockify", self.desktop_ws)
+        app.router.add_get("/desktop", self.desktop_root)
+        app.router.add_get("/desktop/{tail:.*}", self.desktop_http)
         app.router.add_get("/health", self.health)
         app.router.add_get("/", self.index)
 
@@ -351,6 +440,8 @@ class Daemon:
         async def stop_workers(app: web.Application):
             for w in app["workers"]:
                 w.cancel()
+            if self._session and not self._session.closed:
+                await self._session.close()
 
         app.on_startup.append(start_workers)
         app.on_cleanup.append(stop_workers)
@@ -374,28 +465,37 @@ def make_brain(kind: str):
 
 
 async def main() -> None:
+    # Load .env before argparse so AGENT_HOST/AGENT_TOKEN defaults can come from it.
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    load_dotenv()
     parser = argparse.ArgumentParser(prog="agentos", description="Autonomous OS-level agent daemon")
-    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--host", default=os.getenv("AGENT_HOST", "127.0.0.1"),
+                        help="bind address; use 0.0.0.0 to reach it over Tailscale/LAN")
     parser.add_argument("--port", type=int, default=8420)
     parser.add_argument("--container", default="agent-sandbox")
     parser.add_argument("--brain", choices=["auto", "stub"], default="auto")
+    parser.add_argument("--token", default=os.getenv("AGENT_TOKEN", ""),
+                        help="shared secret required on every request (recommended when not on 127.0.0.1)")
     parser.add_argument("--no-container-autostart", action="store_true",
                         help="assume the sandbox container is already running")
     args = parser.parse_args()
-
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    load_dotenv()
+    token = args.token
 
     if not args.no_container_autostart:
         await ensure_container(container=args.container, image="agent-sandbox")
 
-    daemon = Daemon(brain=make_brain(args.brain), sandbox=DockerSandbox(container=args.container))
+    daemon = Daemon(brain=make_brain(args.brain),
+                    sandbox=DockerSandbox(container=args.container), token=token)
     runner = web.AppRunner(daemon.build_app())
     await runner.setup()
     site = web.TCPSite(runner, args.host, args.port)
     await site.start()
-    log.info("agentos daemon in auto mode on http://%s:%d (sandbox: %s, brain: %s)",
-             args.host, args.port, args.container, type(daemon.brain).__name__)
+    if args.host not in ("127.0.0.1", "localhost") and not token:
+        log.warning("bound to %s with NO --token: anyone who can reach this port can "
+                    "drive the agent. Set AGENT_TOKEN (or --token).", args.host)
+    log.info("agentos daemon in auto mode on http://%s:%d (sandbox: %s, brain: %s, auth: %s)",
+             args.host, args.port, args.container, type(daemon.brain).__name__,
+             "token" if token else "open")
     await asyncio.Event().wait()  # run until killed
 
 
