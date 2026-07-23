@@ -401,6 +401,7 @@ class Daemon:
         except Exception:
             raise web.HTTPBadRequest(text="body must be JSON")
         task.instructions = (body.get("instructions") or "").strip()
+        self._persist_task(task)  # write through immediately so an edit survives a restart
         log.info("task %s instructions updated (%d chars)", task.id, len(task.instructions))
         return web.json_response(task.to_dict())
 
