@@ -11,20 +11,26 @@
     --warn: #fbbf24; --err: #f87171; --purple: #c084fc;
   }
   * { box-sizing: border-box; margin: 0; }
+  html { -webkit-text-size-adjust: 100%; }
   body {
-    background: var(--bg); color: var(--text); height: 100vh;
+    background: var(--bg); color: var(--text); height: 100vh; height: 100dvh;
     font: 14px/1.45 system-ui, sans-serif; display: flex; flex-direction: column;
+    overflow: hidden;
   }
   code, .mono { font-family: ui-monospace, monospace; }
 
   header {
     display: flex; align-items: center; gap: 10px; padding: 10px 16px;
-    border-bottom: 1px solid var(--border); background: var(--panel);
+    border-bottom: 1px solid var(--border); background: var(--panel); flex-shrink: 0;
   }
-  header h1 { font-size: 15px; font-weight: 600; }
-  #health-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--err); }
+  header h1 { font-size: 15px; font-weight: 600; flex-shrink: 0; }
+  #health-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--err); flex-shrink: 0; }
   #health-dot.ok { background: var(--ok); }
-  #brain-name { color: var(--dim); font-size: 12px; }
+  #brain-name { color: var(--dim); font-size: 12px; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Back arrow: only shown on phones while a task's detail is open. */
+  #back-btn { display: none; background: none; border: none; color: var(--accent);
+    font-size: 22px; line-height: 1; padding: 2px 6px 2px 0; cursor: pointer; }
 
   main { flex: 1; display: flex; min-height: 0; }
   #sidebar {
@@ -151,12 +157,65 @@
   #shot { align-items: center; justify-content: center; background: #000; }
   #shot img { max-width: 100%; max-height: 100%; }
   #shot .none { color: var(--dim); }
-  #desktop iframe { flex: 1; border: none; }
+  #desktop iframe { flex: 1; border: none; width: 100%; }
+
+  /* ------------------------------------------------------------------ */
+  /* Phone layout: one column. The sidebar (new-task + list) is the home */
+  /* screen; tapping a task slides its detail in over the top, and the   */
+  /* header back arrow slides it away. Desktop keeps the two-pane view.  */
+  /* ------------------------------------------------------------------ */
+  @media (max-width: 760px) {
+    header { padding: 10px 12px; }
+    body.viewing-detail #back-btn { display: inline-flex; align-items: center; }
+
+    main { position: relative; overflow: hidden; }
+    #sidebar, #detail {
+      position: absolute; inset: 0; width: 100%;
+      border-right: none; background: var(--bg);
+    }
+    #sidebar { background: var(--panel); }
+    #detail {
+      transform: translateX(100%); transition: transform .22s ease;
+      will-change: transform;
+    }
+    body.viewing-detail #detail { transform: translateX(0); }
+    body.viewing-detail #sidebar { visibility: hidden; }
+    #placeholder { display: none; }
+
+    /* touch targets + 16px fields so iOS/Android don't zoom on focus */
+    button { padding: 11px 14px; }
+    input, textarea, #guidance-text { font-size: 16px !important; }
+    #new-task { padding: 12px; }
+    #new-task textarea { height: 68px; }
+    #new-task #new-instructions { height: 60px; }
+    #new-task input { padding: 9px 10px; }
+    .task-row { padding: 14px; gap: 5px; }
+    .task-row .goal { font-size: 13px; }
+
+    #detail-head { padding: 12px 14px; }
+    #detail-meta { gap: 6px 14px; }
+    #detail-instructions { height: 92px; }
+
+    /* Pause/Cancel share a row; steer box and Send each span full width. */
+    #controls { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 10px 14px; }
+    #guidance-text, #btn-guide { grid-column: 1 / -1; }
+    #guidance-text { padding: 10px; }
+
+    #tabs { padding: 6px 12px 0; gap: 0; }
+    #tabs button { flex: 1; padding: 11px 4px; text-align: center; }
+
+    #feed { padding: 10px 12px; }
+    .ev { gap: 8px; }
+    .ev .step { width: 26px; }
+    .ev .kind { width: 72px; font-size: 11px; }
+    .ev .body { font-size: 12.5px; }
+  }
 </style>
 </head>
 <body>
 
 <header>
+  <button id="back-btn" aria-label="Back to tasks">‹</button>
   <div id="health-dot"></div>
   <h1>agentos</h1>
   <span id="brain-name"></span>
@@ -279,7 +338,7 @@ async function pollTasks() {
 }
 $("task-list").addEventListener("click", e => {
   const row = e.target.closest(".task-row");
-  if (row) selectTask(row.dataset.id);
+  if (row) openTask(row.dataset.id);
 });
 
 // ---- new task --------------------------------------------------------------
@@ -302,7 +361,7 @@ $("new-task").addEventListener("submit", async e => {
   $("goal").value = "";
   $("new-instructions").value = "";
   await pollTasks();
-  selectTask(t.id);
+  openTask(t.id);
 });
 
 // ---- selection + detail ----------------------------------------------------
@@ -322,6 +381,14 @@ function selectTask(id) {
   pollTasks();
   pollFeed();
 }
+
+// Selecting a task highlights it; opening also slides the detail in on mobile.
+// (Auto-select on load calls selectTask, so the phone lands on the list.)
+function openTask(id) {
+  selectTask(id);
+  document.body.classList.add("viewing-detail");
+}
+$("back-btn").onclick = () => document.body.classList.remove("viewing-detail");
 
 function fmtTime(ts) { return ts ? new Date(ts * 1000).toLocaleTimeString() : "—"; }
 
