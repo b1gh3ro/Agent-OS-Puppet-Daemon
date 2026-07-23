@@ -470,6 +470,7 @@ class GeminiBrain:
         cost is measured: one `model_call` event per round-trip, carrying token
         counts and wall-clock latency. Model *calls* and latency are the metrics
         that caching cannot deflate, so they are recorded alongside tokens."""
+        self._repair_safety_acks(contents)  # heal any unacknowledged safety confirmations first
         last_error: Exception | None = None
         for model in list(self._models):
             started = time.perf_counter()
@@ -716,6 +717,11 @@ class GeminiBrain:
             for fc in calls:
                 args = dict(fc.args or {})
                 log.event(step, "action", name=fc.name, args=args)
+                # Acknowledge any model safety confirmation for EVERY tool — the
+                # waiting tools included. Gemini 400s the *next* request if a
+                # function_call that carried a safety_decision isn't acknowledged
+                # in its function_response, which otherwise wedges the whole task.
+                acknowledged = self._auto_acknowledge_safety(args, log, step)
 
                 if fc.name in ("wait_for_user", "sleep", "wait_for_screen_change"):
                     # Block here (until Resume, a timer, or a screen change); the
@@ -727,11 +733,12 @@ class GeminiBrain:
                     else:
                         payload = await self._wait_for_change(task, args, sandbox, log, step)
                     need_screenshot = True
+                    if acknowledged:
+                        payload["safety_acknowledgement"] = "true"
                     response_parts.append(types.Part(function_response=types.FunctionResponse(
                         name=fc.name, response=payload)))
                     continue
 
-                acknowledged = self._auto_acknowledge_safety(args, log, step)
                 try:
                     payload = await self._execute(fc.name, args, sandbox) or {}
                 except Exception as e:
@@ -792,6 +799,27 @@ class GeminiBrain:
         if decision:
             log.event(step, "safety_auto_acknowledged", decision=decision)
             return True
+
+    @staticmethod
+    def _repair_safety_acks(contents: list[types.Content]) -> None:
+        """Ensure every function response acknowledges the safety_decision its
+        call carried. Gemini rejects the *next* request otherwise, and the bad
+        turn is persisted in task.history — so without this a task that once
+        emitted an unacknowledged confirmation (e.g. a wait_for_user handed off
+        before this was handled) 400s forever, even on continue. Runs before
+        every model call and repairs such histories in place."""
+        for i, content in enumerate(contents):
+            if content.role != "model" or not content.parts:
+                continue
+            need = {p.function_call.name for p in content.parts
+                    if p.function_call and (p.function_call.args or {}).get("safety_decision")}
+            if not need:
+                continue
+            for nxt in contents[i + 1:i + 2]:  # responses live in the next turn
+                for p in (nxt.parts or []):
+                    fr = p.function_response
+                    if fr and fr.name in need and "safety_acknowledgement" not in (fr.response or {}):
+                        fr.response = {**(fr.response or {}), "safety_acknowledgement": "true"}
         return False
 
     async def _execute(self, name: str, args: dict, sandbox: Sandbox) -> dict | None:
