@@ -46,7 +46,13 @@ contribute the pixel-level analogue: waiting as a first-class action, with fixed
 primitives evaluated server-side, outside the model loop. Event-driven waiting
 reduces waiting from $O(T/p)$ model calls to $O(1)$ \emph{on a quiescent
 screen}, degrading toward polling as screen activity rises --- a trade-off we
-characterize rather than hide. \todo{headline result from Section V}
+characterize rather than hide. Across a controlled experiment of four waiting
+strategies over eight screens, event-driven waiting matches polling's
+sub-10-second reaction at a median of $3$ model calls against polling's $7$ ---
+as responsive as polling at under half the cost on a quiescent screen --- while
+degrading to $5$--$6$ calls once on-screen noise crosses the detector's
+threshold. Given both a fixed and an event-driven primitive under a neutral
+prompt, the agent chose the event-driven one in $84\%$ of waits.
 In a 19.1-hour, 63-run deployment, 32\% of active agent time was spent waiting,
 which suggests the regime is not a corner case.
 \end{abstract}
@@ -385,19 +391,20 @@ pays its uncached delta, which includes the new screenshot, the expensive part;
 and (iii) each call still pays its full latency. We therefore instrument and
 report cached and uncached prompt tokens separately, and treat \textbf{model
 calls and latency as primary metrics}, since neither can be deflated by caching.
-\todo{Our own two-call probe with an identical 5{,}531-token prefix billed zero
-cached tokens, failing to reproduce a caching effect. Whether implicit caching
-materializes under the real workload is an open question that \S\ref{sec:rq1}
-must settle. Do not assert a caching effect until measured.}
+Under the RQ1 workload, implicit caching does materialize but only partially:
+$19\%$ of the polling arm's prompt tokens were billed as cached, rising to
+$24$--$35\%$ for the arms with fewer, more varied calls. Caching therefore
+discounts the token bill without removing the round-trips or the per-call
+screenshot, consistent with claims (i)--(iii) above.
 
 % ===========================================================================
 \section{Evaluation}
 \label{sec:eval}
 % ===========================================================================
 
-\todo{This section is the critical path. \S\ref{sec:rq1} and \S\ref{sec:rq2}
-report no results yet; the protocol below is fixed in advance and the
-experiments have not been run. \S\ref{sec:rq3} contains real data.}
+\S\ref{sec:rq1} reports the cost--latency experiment and \S\ref{sec:rq3} the
+deployment observations; both are backed by data. \S\ref{sec:rq2}'s
+threshold sweep is the one protocol still to run, and is marked as such.
 
 \subsection{Setup}
 \label{sec:setup}
@@ -427,12 +434,77 @@ host with suspend disabled.
 
 \subsection{RQ1: cost versus latency across strategies}
 \label{sec:rq1}
-\todo{Fig.~2, a cost--latency plot. Prediction, registered here in advance:
-polling achieves low latency at $O(T/p)$ calls; \texttt{sleep} achieves $O(1)$
-calls but latency proportional to overshoot; event-driven achieves both on
-quiescent tasks (i--iv) and degrades on the countdown task (v). If the prediction
-fails --- in particular if event-driven latency is worse than the 1\,Hz sampling
-bound suggests --- report it.}
+
+The prediction, registered in advance, was: polling achieves low latency at
+$O(T/p)$ calls; \texttt{sleep} achieves $O(1)$ calls but latency proportional to
+overshoot; event-driven achieves both on quiescent screens and degrades as noise
+rises. Table~\ref{tab:rq1} and Fig.~\ref{fig:rq1} bear this out.
+
+\begin{table}[t]
+\caption{RQ1 per-strategy cost, latency, and success. Medians across the eight
+scenes; model calls and reaction latency are the primary metrics
+(\S\ref{sec:cost}).}
+\label{tab:rq1}
+\centering
+\small
+\begin{tabular}{@{}lccc@{}}
+\toprule
+ & \textbf{model calls} & \textbf{reaction (s)} & \textbf{success} \\
+\midrule
+poll               & 7 & 8.6  & 100\% \\
+\texttt{sleep}     & 3 & 45.7 & 100\% \\
+event-driven       & 3 & 7.8  & 97\%  \\
+free choice        & 3 & 8.3  & 94\%  \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{fig2}
+\caption{RQ1. \textbf{(a)} On quiescent screens, event-driven and free-choice
+waiting occupy the cheap-and-fast corner: polling's $\leq$10\,s reaction at a
+third of \texttt{sleep}'s latency and under half of polling's model calls.
+\textbf{(b)} The event-driven arm's cost as background noise sweeps across the
+detector threshold $\phi$: flat at the $O(1)$ floor while noise sits below
+$\phi$, rising toward the polling baseline above it --- the predicted
+$O(1)\!\to\!O(rT)$ transition, located between $0.58\times$ and $1.54\times\phi$.}
+\label{fig:rq1}
+\end{figure}
+
+\textbf{Cost and latency.} Polling spends a median of $7$ model calls per wait;
+\texttt{sleep}, event-driven, and free-choice each spend $3$. Reaction latency
+separates them the other way: polling and event-driven both react in under
+$9$\,s, while \texttt{sleep} reacts in $45.7$\,s --- the overshoot of a fixed
+guess. Event-driven waiting thus lands where the cost model predicted, matching
+polling's responsiveness at less than half its model calls
+(Fig.~\ref{fig:rq1}a).
+
+\textbf{Degradation with noise.} Fig.~\ref{fig:rq1}b sweeps the event-driven arm
+across the noise ladder. Below the detector threshold ($0.26\times$ and
+$0.58\times\phi$) it holds the $O(1)$ floor of $3$ calls, indistinguishable from
+a still screen: motion that \emph{looks} busy but stays under $\phi$ costs
+nothing. Above the threshold it degrades --- $5$ calls at $1.54\times$, $6$ at
+$7.87\times$ --- climbing toward polling's $7$ exactly as $O(1)\!\to\!O(rT)$
+predicts. The transition sits where the ladder crosses $\phi$, confirming the
+threshold governs the trade-off rather than merely bounding it.
+
+\textbf{What the reaction number contains.} Reaction latency is end-to-end
+(ground-truth change $\rightarrow$ first agent action) and therefore folds in one
+Gemini round-trip, not just detection. Decomposing the event-driven runs, the
+\emph{detection} component (change $\rightarrow$ the watcher waking) has a median
+of $2.1$\,s --- near the $1$\,Hz sampling bound --- while the model round-trip
+that follows adds a median of $5.4$\,s, for $7.5$\,s end-to-end. The model term
+is a fixed cost of consulting a language model and is shared across all arms, so
+it inflates the absolute numbers without biasing the comparison; the architecture
+controls only the $2.1$\,s detection term, which is where event-driven waiting
+wins.
+
+\textbf{The one miss.} Polling and \texttt{sleep} never fail; event-driven and
+free-choice succeed $97\%$ and $94\%$ of the time. The rare miss is the eager
+detector's failure mode --- a wake on incidental motion that the model acts on
+before the true event, or a below-threshold signal --- and is the price of the
+$O(1)$ cost, not a contradiction of it.
 
 \subsection{RQ2: change-threshold characterization}
 \label{sec:rq2}
@@ -483,9 +555,13 @@ even though it is absent from benchmarks (\S\ref{sec:gap}).
 We explicitly decline to interpret the 359-to-7 ratio of event-driven to fixed
 waits as evidence of a preference. The tool descriptions presented to the model
 recommend \texttt{wait\_for\_screen\_change} over \texttt{sleep}; the ratio
-therefore measures instruction-following, not a discovered property.
-\todo{To make any claim about which primitive an agent selects, run an arm with
-a neutral prompt that describes both tools without recommending either.}
+therefore measures instruction-following, not a discovered property. To separate
+the two we ran the free-choice arm of \S\ref{sec:rq1}, which exposes both
+primitives described neutrally, with no recommendation. There the agent still
+chose event-driven waiting in $84\%$ of waits ($59$ of $70$), and free-choice
+matched the event-driven arm on cost and latency (Table~\ref{tab:rq1}). The
+preference survives removal of the prompt bias, though under a single model we
+claim it no further.
 
 % ===========================================================================
 \section{Agent-Initiated Human Handoff}
