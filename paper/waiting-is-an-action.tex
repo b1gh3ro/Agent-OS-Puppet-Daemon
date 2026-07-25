@@ -63,8 +63,7 @@ strategies over eight screens, it matches polling's sub-10-second reaction at a
 median of $3$ model calls against polling's $7$, then rises to $6$--$7$ calls
 once on-screen noise crosses the detector's threshold. Given both a fixed and an
 event-driven primitive under a neutral prompt, the agent chose the event-driven
-one in $82\%$ of waits. In a 19.1-hour, 63-run deployment, $32\%$ of active agent
-time was spent waiting, so the pattern is not a corner case.
+one in $82\%$ of waits.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -86,8 +85,8 @@ This is not the setting that GUI agent research measures. Benchmarks such as
 WindowsAgentArena~\cite{waa}, OSWorld~\cite{osworld}, and WebArena~\cite{webarena}
 evaluate tasks that finish in minutes and score them on success rate. They report
 neither wall-clock duration nor the token cost of waiting, because for such tasks
-waiting is negligible. In deployment it is not: in the 63-run deployment we
-describe in Section~\ref{sec:eval}, waiting consumed 32\% of active agent time.
+waiting is negligible. In real use it is not: an agent can spend a large share of
+its active time waiting, and that time is exactly what these benchmarks omit.
 
 \subsection{The gap}
 The dominant agent architecture, ReAct~\cite{react}, models an agent as an
@@ -135,9 +134,8 @@ We contribute:
   strategies, and a characterization of the change-detection threshold that
   governs the trade-off between false wakes and missed changes
   (Section~\ref{sec:eval}).
-  \item \textbf{C3.} A design for agent-initiated human handoff, and
-  observations from a 63-run, 19.1-hour deployment
-  (Sections~\ref{sec:handoff} and~\ref{sec:eval}).
+  \item \textbf{C3.} A design for agent-initiated human handoff, for waits that
+  no detector can resolve (Section~\ref{sec:handoff}).
 \end{itemize}
 
 % ===========================================================================
@@ -332,7 +330,7 @@ they are correct.
 \algline{}{\textbf{Input:} timeout $T_{\max}$, sandbox $S$}
 \algline{}{\textbf{Output:} (changed, elapsed)}
 \algline{1}{$b \leftarrow$ Thumbnail(Screenshot($S$))}
-\algline{2}{$t_0 \leftarrow$ MonotonicNow() \hfill $\triangleright$ not wall-clock; \S\ref{sec:setup}}
+\algline{2}{$t_0 \leftarrow$ MonotonicNow() \hfill $\triangleright$ not wall-clock; Section~\ref{sec:setup}}
 \algline{3}{\textbf{while} MonotonicNow() $- \; t_0 < T_{\max}$ \textbf{do}}
 \algline{4}{\algind \textbf{if} Cancelled() \textbf{or} WakeRequested() \textbf{then}}
 \algline{5}{\algind\algind \textbf{return} (false, MonotonicNow() $-\; t_0$)}
@@ -410,9 +408,8 @@ screenshot, consistent with claims (i)--(iii) above.
 \label{sec:eval}
 % ===========================================================================
 
-The three research questions are all backed by data: \S\ref{sec:rq1} the
-cost--latency experiment, \S\ref{sec:rq2} the threshold sweep, and
-\S\ref{sec:rq3} the deployment observations.
+Two controlled experiments back the claims: Section~\ref{sec:rq1}, the cost--latency
+comparison across strategies, and Section~\ref{sec:rq2}, the threshold sweep.
 
 \subsection{Setup}
 \label{sec:setup}
@@ -423,7 +420,7 @@ replaced on completion. Four form a \emph{noise ladder}: the same wait against
 increasing background activity (a spinner, a small and a large ticking clock, a
 scrolling log), whose amplitudes are \emph{measured} against the detector
 threshold rather than judged by eye and span from below it to well above it
-(\S\ref{sec:rq2}). One is a \emph{no-change control} that never resolves, to
+(Section~\ref{sec:rq2}). One is a \emph{no-change control} that never resolves, to
 measure timeout cost and catch hallucination. Every event reveals a codeword the
 agent must echo back, so a run that never watched the screen cannot score as a
 success. The driver fires each event at a fixed point on the monotonic clock, so
@@ -441,11 +438,9 @@ separately; output tokens; reaction latency (ground-truth change $\rightarrow$
 first agent action); and task wall-clock.
 
 \textbf{Measurement of duration.} All durations are recorded with an in-process
-monotonic clock, never as differences of wall-clock timestamps. This matters. In
-our deployment logs (\S\ref{sec:rq3}), host suspend inflated wall-clock spans by
-22 hours across 63 runs (54\% of the naive total), while in-process durations
-were unaffected. A wait that reports 19\,s of elapsed loop
-time may span 10 hours of wall-clock if the host sleeps in between. \emph{On a
+monotonic clock, never as differences of wall-clock timestamps. This matters on a
+suspendable host: if the machine sleeps mid-wait, a loop that ran for seconds can
+span hours of wall-clock, while the in-process duration is unaffected. \emph{On a
 suspendable host, wall-clock deltas are not durations.} Experiments are run on a
 host with suspend disabled.
 
@@ -460,7 +455,7 @@ rises. Table~\ref{tab:rq1} and Fig.~\ref{fig:rq1} bear this out.
 \begin{table}[t]
 \caption{RQ1 per-strategy cost, latency, and success. Medians across the eight
 scenes; model calls and reaction latency are the primary metrics
-(\S\ref{sec:cost}).}
+(Section~\ref{sec:cost}).}
 \label{tab:rq1}
 \centering
 \small
@@ -519,8 +514,15 @@ scenes with the subtlest change, the terminal build (a single completion line) a
 the download (a banner swap), where the pixel change occasionally fell below $\phi$
 and the detector never woke. Polling and \texttt{sleep} avoid this because they
 re-read the whole screen with the model on a schedule rather than depending on the
-pixel diff. This is the missed-change side of the threshold (\S\ref{sec:rq2}), and
+pixel diff. This is the missed-change side of the threshold (Section~\ref{sec:rq2}), and
 the price of the $O(1)$ cost.
+
+The free-choice arm exposes both \texttt{sleep} and event-driven waiting with
+neutral descriptions and no recommendation, to see which the model selects on its
+own. It chose event-driven waiting in $82\%$ of waits ($73$ of $89$), and matched
+the event-driven arm on cost and latency (Table~\ref{tab:rq1}). The preference
+does not depend on a prompt that recommends one tool, though under a single model
+we claim it no further.
 
 \subsection{RQ2: change-threshold characterization}
 \label{sec:rq2}
@@ -547,66 +549,17 @@ usable band in which no noise wakes the detector yet the event is still caught.}
 Two things follow. First, the false-wake curves fall to zero exactly as $\phi$
 passes each scene's measured amplitude ($0.2\times$, $1.4\times$, $16\times\phi_0$),
 confirming that $\phi$ \emph{governs} the $O(1)\!\to\!O(rT)$ boundary of
-\S\ref{sec:cost} rather than merely bounding it: a scene is quiescent-in-effect
+Section~\ref{sec:cost} rather than merely bounding it: a scene is quiescent-in-effect
 precisely when its amplitude sits below $\phi$. Second, the signal changes
 $33.6\times\phi_0$ of the screen, far above every noise scene, so any $\phi$ in
 the band $[\,1.4\times,\,33.6\times\,]\phi_0$ eliminates the clock's false wakes
 while still catching the event. The production $\phi_0$ sits at the eager end of
 the safe range: it admits some false wakes on the busier scenes (which the model
-filters, \S\ref{sec:waiting}) in exchange for never missing a signal, the
+filters, Section~\ref{sec:waiting}) in exchange for never missing a signal, the
 asymmetry we intended. Raising $\phi$ toward the signal amplitude would trade
 those false wakes for missed events on any scene whose real signal is smaller than
 the banner used here, so we do not; a fixed scalar $\phi$ is a starting point,
 not the final answer.
-
-\subsection{RQ3: deployment observations}
-\label{sec:rq3}
-We report descriptive statistics from 63 runs of the system during development
-and personal use.
-
-\textbf{This data is observational, not experimental}, and we draw no causal
-conclusions from it. Runs pursued heterogeneous goals (web research, media
-playback, messaging, shell introspection); there were no controls, no repeats,
-and no hypothesis fixed in advance. Its role here is solely to establish that the
-waiting regime occurs in practice.
-
-\begin{table}[t]
-\caption{Deployment observations, 63 runs. Durations are in-process
-monotonic measurements; see \S\ref{sec:setup}.}
-\label{tab:deploy}
-\centering
-\small
-\begin{tabular}{@{}lr@{}}
-\toprule
-Runs & 63 \\
-Active agent time (suspend-free) & 19.1\,h \\
-Total actions & 3{,}893 \\
-\midrule
-Time spent inside waits & 6.1\,h (32\% of active) \\
-\texttt{wait\_for\_screen\_change} calls & 359 \\
-\quad ended in a detected change & 240 \\
-\quad ended by operator wake & 19 \\
-\quad timed out with no change & 100 \\
-\texttt{sleep} calls & 7 \\
-Polling \texttt{wait} calls & 354 \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-The main observation in Table~\ref{tab:deploy} is that $32\%$ of active agent time
-was spent waiting. Waiting is not a corner case in deployment even though it is
-absent from benchmarks (\S\ref{sec:gap}).
-
-We do not interpret the 359-to-7 ratio of event-driven to fixed waits as evidence
-of a preference. The tool descriptions presented to the model
-recommend \texttt{wait\_for\_screen\_change} over \texttt{sleep}; the ratio
-therefore measures instruction-following, not a discovered property. To separate
-the two we ran the free-choice arm of \S\ref{sec:rq1}, which exposes both
-primitives described neutrally, with no recommendation. There the agent still
-chose event-driven waiting in $82\%$ of waits ($73$ of $89$), and free-choice
-matched the event-driven arm on cost and latency (Table~\ref{tab:rq1}). The
-preference survives removal of the prompt bias, though under a single model we
-claim it no further.
 
 % ===========================================================================
 \section{Agent-Initiated Human Handoff}
@@ -621,14 +574,9 @@ needs, and suspend; the operator acts, and the agent resumes with a fresh
 screenshot. A complementary guard escalates automatically: three consecutive
 empty or filtered model responses trigger a handoff rather than an unbounded
 retry loop. The operator may also inject \emph{guidance} mid-run without
-restarting the task.
-
-Across the deployment we observed 17 agent-initiated handoffs (logins, a captcha,
-a credential entry) and 203 operator guidance messages. We present these as
-design and qualitative observation only: there is no controlled baseline, and the
-203 guidance messages indicate a human was frequently in the loop. These runs
-were supervised, not autonomous, and should not be read as evidence of unattended
-operation.
+restarting the task. We present this as a design element that completes the set of
+waiting primitives, alongside \texttt{sleep} and \texttt{wait\_for\_screen\_change};
+we make no autonomy claim for it.
 
 % ===========================================================================
 \section{Limitations and Ethics}
@@ -636,7 +584,7 @@ operation.
 
 \textbf{The degenerate case.} On a screen with continuous motion, event-driven
 waiting fires on every frame and performs \emph{worse} than polling, since each
-false wake is an unbounded-rate model call (\S\ref{sec:cost}). The primitive is
+false wake is an unbounded-rate model call (Section~\ref{sec:cost}). The primitive is
 correct only for screens that are quiescent between meaningful events.
 
 \textbf{Pixel-level detection is blind to off-screen change.} A download that
@@ -648,20 +596,12 @@ rather than proposing one.
 and one screen resolution. The thresholds in~(\ref{eq:change}) are tuned for this
 configuration and we make no claim that they transfer.
 
-\textbf{Observational data.} Section~\ref{sec:rq3} is descriptive. Goals differed
-across runs and none were repeated; it establishes that a regime exists, nothing
-more.
-
 \textbf{Ethics.} The agent executes exclusively inside a Docker-isolated
-sandbox with no host filesystem access. The controlled experiments
-(\S\ref{sec:rq1},~\S\ref{sec:rq2}) are entirely synthetic: scripted dialogs,
+sandbox with no host filesystem access. All experiments
+(Sections~\ref{sec:rq1} and~\ref{sec:rq2}) are entirely synthetic: scripted dialogs,
 clocks, and terminals with no accounts, no personal data, and no human subjects.
-The deployment logs behind \S\ref{sec:rq3}, however, arose from personal use and
-contain third-party conversation data from people who did not consent to
-appearing in a research artifact. We therefore report only aggregate counts from
-those logs, never message content, and withhold the raw logs entirely; the
-released artifact comprises the code and the synthetic task suite alone. The motivating example opening Section~\ref{sec:intro} is synthetic for
-the same reason.
+The released artifact comprises the code and the synthetic task suite. The
+motivating example opening Section~\ref{sec:intro} is synthetic as well.
 
 % ===========================================================================
 \section{Conclusion}
