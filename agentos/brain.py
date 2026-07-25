@@ -280,7 +280,7 @@ RUN_COMMAND_OUTPUT_LIMIT = 4000
 
 # After this many *consecutive* blocked/empty responses, stop silently
 # retrying and hand control to the operator instead of spinning.
-BLOCK_PAUSE_THRESHOLD = 3
+BLOCK_PAUSE_THRESHOLD = 4
 
 # Model key names -> xdotool keysym names (pass-through when unmapped).
 _KEYMAP = {
@@ -522,6 +522,49 @@ class GeminiBrain:
         finally:
             task.wait_message = None
 
+    async def _recover_from_block(self, task: Task, sandbox: Sandbox,
+                                  contents: list[types.Content], log: RunLog,
+                                  step: int, streak: int) -> None:
+        """Break a content-filter loop without operator help. The block fires on
+        content already in the context (usually the accumulated screenshots), so
+        re-sending the same turn blocks again. Escalate each retry: shed old
+        frames, then drop every frame, then go text-only, so the context that gets
+        sent is never the one that was just blocked."""
+        if streak == 1:
+            # Elide all but the most recent frame, then present one fresh frame.
+            self._trim_screenshots(contents, keep=1)
+            png = await self._settled_screenshot(sandbox)
+            log.event(step, "block_recover", how="shed-old-frames", streak=streak)
+            contents.append(types.Content(role="user", parts=[
+                types.Part(text="(The previous turn was blocked by a content "
+                                "filter. Fresh screenshot below — continue the "
+                                "task, and steer away from whatever on-screen "
+                                "content may have tripped it.)"),
+                types.Part.from_bytes(data=png, mime_type="image/png"),
+            ]))
+        elif streak < BLOCK_PAUSE_THRESHOLD - 1:
+            # Drop ALL history frames (the likely trigger); one fresh frame only.
+            self._trim_screenshots(contents, keep=0)
+            png = await self._settled_screenshot(sandbox)
+            log.event(step, "block_recover", how="drop-all-frames", streak=streak)
+            contents.append(types.Content(role="user", parts=[
+                types.Part(text="(Still blocked. Cleared the history screenshots. "
+                                "From this one fresh frame, take the safest next "
+                                "step toward the task; if you are on sensitive "
+                                "content, navigate away from it first.)"),
+                types.Part.from_bytes(data=png, mime_type="image/png"),
+            ]))
+        else:
+            # Even a single fresh frame trips it: go text-only, no image at all.
+            self._trim_screenshots(contents, keep=0)
+            log.event(step, "block_recover", how="text-only", streak=streak)
+            contents.append(types.Content(role="user", parts=[types.Part(text=(
+                "(A content filter keeps blocking the screen, so no new screenshot "
+                "can be shared. Take the safest next action toward the task from "
+                "memory — scroll, or navigate away from sensitive content — "
+                "or give your best final text answer if the task is effectively "
+                "done.)"))]))
+
     @staticmethod
     async def _wait_for_user(task: Task, args: dict, log: RunLog, step: int) -> dict:
         """Model-initiated pause: surface a message and block until the operator
@@ -686,18 +729,29 @@ class GeminiBrain:
             response = await self._generate(contents, log, step, task.instructions)
             candidate = response.candidates[0] if response.candidates else None
             if candidate is None or candidate.content is None:
-                # Filtered/empty responses happen; nudge instead of crashing.
+                # A prompt-level SAFETY block (block_reason=SAFETY, no ratings)
+                # re-fires on the SAME context, so a plain retry loops forever and
+                # the screen looks frozen. Self-heal by shedding the content that
+                # most likely tripped the filter (the accumulated screenshots) and
+                # presenting a fresh, leaner turn; only fall back to the human once
+                # even a text-only context still blocks.
                 detail = str(getattr(response, "prompt_feedback", None) or "no detail")
                 log.event(step, "empty_response", detail=detail)
                 blocked_streak += 1
                 if blocked_streak >= BLOCK_PAUSE_THRESHOLD:
-                    # Google keeps blocking us — stop spinning, ask the human.
                     await self._pause_for_block(task, log, step, blocked_streak)
                     blocked_streak = 0
-                contents.append(types.Content(role="user", parts=[types.Part(text=(
-                    "(Your previous turn came back empty — possibly filtered. "
-                    "Continue the task, taking a different approach if the last "
-                    "action was the trigger.)"))]))
+                    # Operator has acted; re-present the current screen so we don't
+                    # resume onto the same frozen frame.
+                    png = await self._settled_screenshot(sandbox)
+                    contents.append(types.Content(role="user", parts=[
+                        types.Part(text="(Resumed after operator help — fresh "
+                                        "screenshot below. Continue the task.)"),
+                        types.Part.from_bytes(data=png, mime_type="image/png"),
+                    ]))
+                else:
+                    await self._recover_from_block(task, sandbox, contents, log,
+                                                   step, blocked_streak)
                 continue
             blocked_streak = 0
             contents.append(candidate.content)
