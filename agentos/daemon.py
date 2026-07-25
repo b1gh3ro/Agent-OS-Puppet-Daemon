@@ -405,6 +405,91 @@ class Daemon:
         log.info("task %s instructions updated (%d chars)", task.id, len(task.instructions))
         return web.json_response(task.to_dict())
 
+    async def experiment(self, request: web.Request) -> web.Response:
+        """A live, auto-refreshing view of the RQ1 batch: progress, the run in
+        flight, and per-arm averages so far. Read-only; reads the driver's
+        results file and log directly."""
+        import html as _html
+
+        results = Path("experiments/results/rq1.jsonl")
+        logf = Path("experiments/results/batch.log")
+        total = 160
+        rows = []
+        if results.exists():
+            for line in results.read_text(encoding="utf-8").splitlines():
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+        done = len(rows)
+
+        current = "—"
+        if logf.exists():
+            for line in reversed(logf.read_text(encoding="utf-8", errors="replace").splitlines()):
+                s = line.strip()
+                if s.startswith("[") and "..." in s and "skip" not in s:
+                    current = s
+                    break
+
+        # per-arm aggregates over completed, non-error rows
+        arms: dict[str, list] = {}
+        for r in rows:
+            if r.get("error"):
+                continue
+            arms.setdefault(r.get("arm", "?"), []).append(r)
+
+        def avg(xs):
+            xs = [x for x in xs if isinstance(x, (int, float))]
+            return sum(xs) / len(xs) if xs else 0.0
+
+        arm_rows = ""
+        for arm in ("poll", "sleep", "event", "free"):
+            g = arms.get(arm, [])
+            if not g:
+                arm_rows += f"<tr><td>{arm}</td><td>0</td><td>—</td><td>—</td><td>—</td></tr>"
+                continue
+            calls = avg([r.get("model_calls") for r in g])
+            lat = avg([r.get("reaction_latency_s") for r in g if r.get("reaction_latency_s") is not None])
+            ok = sum(1 for r in g if r.get("success")) / len(g) * 100
+            arm_rows += (f"<tr><td>{arm}</td><td>{len(g)}</td><td>{calls:.1f}</td>"
+                         f"<td>{lat:.1f}s</td><td>{ok:.0f}%</td></tr>")
+
+        recent = ""
+        for r in rows[-8:][::-1]:
+            recent += (f"<tr><td>{_html.escape(str(r.get('arm')))}</td>"
+                       f"<td>{_html.escape(str(r.get('task')))}</td>"
+                       f"<td>r{r.get('repeat')}</td>"
+                       f"<td>{r.get('model_calls')}</td>"
+                       f"<td>{r.get('reaction_latency_s')}</td>"
+                       f"<td>{'✓' if r.get('success') else '✗'}</td></tr>")
+
+        pct = done / total * 100
+        page = f"""<!doctype html><html><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width, initial-scale=1">
+<meta http-equiv=refresh content=5>
+<title>RQ1 batch — {done}/{total}</title>
+<style>
+ body{{background:#0f1115;color:#d7dae2;font:15px/1.5 system-ui,sans-serif;margin:0;padding:16px}}
+ h1{{font-size:17px;margin:0 0 4px}} .dim{{color:#8a90a0;font-size:13px}}
+ .bar{{height:22px;background:#1e2230;border:1px solid #2a2f3d;border-radius:6px;overflow:hidden;margin:12px 0}}
+ .fill{{height:100%;background:#6ea8fe;width:{pct:.1f}%}}
+ .cur{{background:#171a21;border:1px solid #2a2f3d;border-radius:6px;padding:10px;font-family:ui-monospace,monospace;font-size:13px;word-break:break-word}}
+ table{{border-collapse:collapse;width:100%;margin-top:16px;font-size:14px}}
+ th,td{{text-align:left;padding:6px 8px;border-bottom:1px solid #2a2f3d}} th{{color:#8a90a0;font-weight:600}}
+ h2{{font-size:14px;color:#8a90a0;margin:18px 0 4px}}
+</style></head><body>
+<h1>RQ1 waiting-cost batch</h1>
+<div class=dim>auto-refreshes every 5s · {done} of {total} runs done ({pct:.0f}%)</div>
+<div class=bar><div class=fill></div></div>
+<div class=cur>▶ {_html.escape(current)}</div>
+<h2>per-arm averages so far</h2>
+<table><tr><th>arm</th><th>n</th><th>avg calls</th><th>avg reaction</th><th>success</th></tr>{arm_rows}</table>
+<h2>last completed</h2>
+<table><tr><th>arm</th><th>task</th><th>rep</th><th>calls</th><th>reaction</th><th>ok</th></tr>{recent}</table>
+</body></html>"""
+        return web.Response(text=page, content_type="text/html",
+                            headers={"Cache-Control": "no-store"})
+
     async def health(self, request: web.Request) -> web.Response:
         return web.json_response({
             "ok": True,
@@ -432,6 +517,7 @@ class Daemon:
         app.router.add_get("/desktop/websockify", self.desktop_ws)
         app.router.add_get("/desktop", self.desktop_root)
         app.router.add_get("/desktop/{tail:.*}", self.desktop_http)
+        app.router.add_get("/experiment", self.experiment)
         app.router.add_get("/health", self.health)
         app.router.add_get("/", self.index)
 
