@@ -21,6 +21,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     wget \
     unzip \
+    # Test-stimulus generators for the waiting-cost experiments (experiments/):
+    # xmessage (x11-utils) is the static notification banner; xclock (x11-apps)
+    # is a controlled-noise scene. Not used by the agent in normal operation.
+    x11-utils \
+    x11-apps \
     && rm -rf /var/lib/apt/lists/*
 
 # Skip Firefox's first-run wizard/telemetry so tasks start on a clean page.

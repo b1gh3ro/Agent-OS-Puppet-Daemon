@@ -25,7 +25,11 @@ websockify --web /usr/share/novnc 6080 localhost:5900 &
 
 # Pre-launch the browser so tasks don't burn steps figuring out how to open
 # it — and respawn it if it ever dies, so the desktop is never left empty.
-(while true; do firefox-esr >/dev/null 2>&1; sleep 2; done) &
+# Set NO_BROWSER=1 for a bare desktop (used by the waiting-cost experiments,
+# whose scenes require that the only thing that changes is the injected event).
+if [ -z "$NO_BROWSER" ]; then
+    (while true; do firefox-esr >/dev/null 2>&1; sleep 2; done) &
+fi
 
 echo "sandbox ready on :99 (${RESOLUTION}), watch at http://localhost:6080"
 tail -f /dev/null
