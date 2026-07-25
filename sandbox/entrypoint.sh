@@ -4,9 +4,11 @@ set -e
 
 RESOLUTION="${RESOLUTION:-1280x800x24}"
 
-# A container that gets stopped uncleanly (host sleep, Docker restart) leaves
-# this socket behind; a stale one makes Xvfb refuse to start on :99 at all.
-rm -f /tmp/.X11-unix/X99
+# A container that gets stopped uncleanly (host sleep, Docker restart, or a
+# plain `docker start` of a stopped container) leaves the X socket AND lock
+# behind; either one makes Xvfb refuse to start on :99, so a restarted sandbox
+# comes up with a dead display. Clear both before launching.
+rm -f /tmp/.X11-unix/X99 /tmp/.X99-lock
 
 Xvfb :99 -screen 0 "$RESOLUTION" -nolisten tcp &
 
