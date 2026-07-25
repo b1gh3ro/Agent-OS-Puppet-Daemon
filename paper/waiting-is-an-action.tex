@@ -514,9 +514,13 @@ arms, so it inflates the absolute numbers without biasing the comparison. The
 architecture controls only the $2.1$\,s detection term.
 
 Polling and \texttt{sleep} never fail; event-driven and free-choice succeed $95\%$
-and $92\%$ of the time. The rare miss is the eager detector's failure mode: a wake
-on incidental motion that the model acts on before the true event, or a
-below-threshold signal. It is the price of the $O(1)$ cost.
+and $92\%$ of the time. Every one of the five misses was a timeout on the two
+scenes with the subtlest change, the terminal build (a single completion line) and
+the download (a banner swap), where the pixel change occasionally fell below $\phi$
+and the detector never woke. Polling and \texttt{sleep} avoid this because they
+re-read the whole screen with the model on a schedule rather than depending on the
+pixel diff. This is the missed-change side of the threshold (\S\ref{sec:rq2}), and
+the price of the $O(1)$ cost.
 
 \subsection{RQ2: change-threshold characterization}
 \label{sec:rq2}
