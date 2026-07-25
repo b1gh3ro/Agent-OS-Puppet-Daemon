@@ -60,10 +60,10 @@ server-side, outside the model loop. Event-driven waiting reduces waiting from
 $O(T/p)$ model calls to $O(1)$ on a quiescent screen, and degrades toward polling
 as screen activity rises. Across a controlled experiment of four waiting
 strategies over eight screens, it matches polling's sub-10-second reaction at a
-median of $3$ model calls against polling's $7$, then rises to $5$--$6$ calls
+median of $3$ model calls against polling's $7$, then rises to $6$--$7$ calls
 once on-screen noise crosses the detector's threshold. Given both a fixed and an
 event-driven primitive under a neutral prompt, the agent chose the event-driven
-one in $84\%$ of waits. In a 19.1-hour, 63-run deployment, $32\%$ of active agent
+one in $82\%$ of waits. In a 19.1-hour, 63-run deployment, $32\%$ of active agent
 time was spent waiting, so the pattern is not a corner case.
 \end{abstract}
 
@@ -468,10 +468,10 @@ scenes; model calls and reaction latency are the primary metrics
 \toprule
  & \textbf{model calls} & \textbf{reaction (s)} & \textbf{success} \\
 \midrule
-poll               & 7 & 8.6  & 100\% \\
-\texttt{sleep}     & 3 & 45.7 & 100\% \\
-event-driven       & 3 & 7.8  & 97\%  \\
-free choice        & 3 & 8.3  & 94\%  \\
+poll               & 7 & 8.3  & 100\% \\
+\texttt{sleep}     & 3 & 45.3 & 100\% \\
+event-driven       & 3 & 7.9  & 95\%  \\
+free choice        & 3 & 8.6  & 92\%  \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -492,7 +492,7 @@ $O(1)\!\to\!O(rT)$ transition, located between $0.58\times$ and $1.54\times\phi$
 Polling spends a median of $7$ model calls per wait, while \texttt{sleep},
 event-driven, and free-choice each spend $3$. Reaction latency separates them the
 other way: polling and event-driven both react in under $9$\,s, while
-\texttt{sleep} reacts in $45.7$\,s, the overshoot of a fixed guess. Event-driven
+\texttt{sleep} reacts in $45.3$\,s, the overshoot of a fixed guess. Event-driven
 waiting lands where the cost model predicted, matching polling's responsiveness at
 less than half its model calls (Fig.~\ref{fig:rq1}a).
 
@@ -500,22 +500,21 @@ Fig.~\ref{fig:rq1}b sweeps the event-driven arm across the noise ladder. Below t
 detector threshold, at $0.26\times$ and $0.58\times\phi$, it holds the $O(1)$
 floor of $3$ calls, indistinguishable from a still screen: motion that
 \emph{looks} busy but stays under $\phi$ costs nothing. Above the threshold it
-degrades, to $5$ calls at $1.54\times$ and $6$ at $7.87\times$, climbing toward
-polling's $7$ as $O(1)\!\to\!O(rT)$ predicts. The transition sits where the ladder
-crosses $\phi$, so the threshold governs the trade-off rather than merely bounding
-it.
+degrades, to $6$ calls at $1.54\times$ and $7$ at $7.87\times$, reaching polling's
+$7$ as $O(1)\!\to\!O(rT)$ predicts. The transition sits where the ladder crosses
+$\phi$, so the threshold governs the trade-off rather than merely bounding it.
 
 The reaction figure is end-to-end, from the ground-truth change to the first agent
 action, so it folds in one Gemini round-trip rather than detection alone.
 Decomposing the event-driven runs, the detection component (change to the watcher
 waking) has a median of $2.1$\,s, near the $1$\,Hz sampling bound, while the model
-round-trip that follows adds a median of $5.4$\,s, for $7.5$\,s end-to-end. That
+round-trip that follows adds a median of $5.6$\,s, for $7.7$\,s end-to-end. That
 model term is a fixed cost of consulting a language model and is shared across all
 arms, so it inflates the absolute numbers without biasing the comparison. The
 architecture controls only the $2.1$\,s detection term.
 
-Polling and \texttt{sleep} never fail; event-driven and free-choice succeed $97\%$
-and $94\%$ of the time. The rare miss is the eager detector's failure mode: a wake
+Polling and \texttt{sleep} never fail; event-driven and free-choice succeed $95\%$
+and $92\%$ of the time. The rare miss is the eager detector's failure mode: a wake
 on incidental motion that the model acts on before the true event, or a
 below-threshold signal. It is the price of the $O(1)$ cost.
 
@@ -600,7 +599,7 @@ recommend \texttt{wait\_for\_screen\_change} over \texttt{sleep}; the ratio
 therefore measures instruction-following, not a discovered property. To separate
 the two we ran the free-choice arm of \S\ref{sec:rq1}, which exposes both
 primitives described neutrally, with no recommendation. There the agent still
-chose event-driven waiting in $84\%$ of waits ($59$ of $70$), and free-choice
+chose event-driven waiting in $82\%$ of waits ($73$ of $89$), and free-choice
 matched the event-driven arm on cost and latency (Table~\ref{tab:rq1}). The
 preference survives removal of the prompt bias, though under a single model we
 claim it no further.
