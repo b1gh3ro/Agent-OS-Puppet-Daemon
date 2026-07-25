@@ -323,6 +323,37 @@ async def pause_gate(task: Task, log: RunLog, step: int) -> None:
     log.event(step, "resumed")
 
 
+# An agent-initiated wait for a human (wait_for_user, or a safety-block pause)
+# self-resumes after this long, so the agent keeps trying on its own rather than
+# blocking forever when nobody is at the console. The manual Pause button is
+# unaffected — that one stays paused until the operator resumes.
+WAIT_FOR_USER_TIMEOUT = 600.0  # 10 minutes
+
+
+async def await_operator(task: Task, log: RunLog, step: int,
+                         timeout: float = WAIT_FOR_USER_TIMEOUT) -> bool:
+    """Block while an agent-initiated pause is in effect, but give up after
+    `timeout` seconds and release the gate ourselves so the agent can continue.
+    Returns True if it timed out (nobody resumed), False if the operator resumed.
+    Honors cancel throughout."""
+    task.paused = True
+    log.event(step, "paused")
+    deadline = time.monotonic() + timeout
+    try:
+        while task.pause_requested:
+            if task.cancel_requested:
+                raise TaskCancelled()
+            if time.monotonic() >= deadline:
+                task.pause_requested = False  # release ourselves; nobody came
+                log.event(step, "wait_timeout", after_s=round(timeout))
+                return True
+            await asyncio.sleep(0.25)
+    finally:
+        task.paused = False
+    log.event(step, "resumed")
+    return False
+
+
 class StubBrain:
     """Screenshot-only brain for smoke-testing the daemon without an API key."""
 
@@ -518,7 +549,7 @@ class GeminiBrain:
         task.pause_requested = True
         log.event(step, "blocked_pause", streak=streak)
         try:
-            await pause_gate(task, log, step)  # blocks until Resume; raises on Cancel
+            await await_operator(task, log, step)  # resume, or auto-continue after 10 min
         finally:
             task.wait_message = None
 
@@ -575,10 +606,15 @@ class GeminiBrain:
         task.pause_requested = True
         log.event(step, "wait_for_user", message=msg)
         try:
-            await pause_gate(task, log, step)  # blocks until Resume; raises on Cancel
+            timed_out = await await_operator(task, log, step, WAIT_FOR_USER_TIMEOUT)
         finally:
             task.wait_message = None
             task.wait_kind = None
+        if timed_out:
+            return {"resumed": False, "timed_out": True, "note": (
+                "No operator responded within 10 minutes. Continue on your own: "
+                "take the best next action toward the task without human help, or "
+                "give your best final answer if this genuinely needs a human.")}
         return {"resumed": True, "note": "Operator resumed; screen reflects their changes."}
 
     @staticmethod
