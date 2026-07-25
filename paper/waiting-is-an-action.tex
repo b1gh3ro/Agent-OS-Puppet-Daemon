@@ -647,13 +647,16 @@ across runs and none were repeated; it establishes that a regime exists, nothing
 more.
 
 \textbf{Ethics.} The agent executes exclusively inside a Docker-isolated
-sandbox with no host filesystem access. Our deployment logs contain third-party
-conversation data --- messages from people who did not consent to appearing in a
-research artifact. \todo{Decision required before any artifact release: scrub
-\texttt{runs/} of all third-party content, or withhold the logs and release only
-the code and the synthetic task suite. The motivating example opening
-Section~\ref{sec:intro} is synthetic for this reason. Do not release the raw
-logs.}
+sandbox with no host filesystem access. The controlled experiments
+(\S\ref{sec:rq1},~\S\ref{sec:rq2}) are entirely synthetic --- scripted dialogs,
+clocks, and terminals with no accounts, no personal data, and no human subjects.
+The deployment logs behind \S\ref{sec:rq3}, however, arose from personal use and
+contain third-party conversation data from people who did not consent to
+appearing in a research artifact. We therefore report only aggregate counts from
+those logs --- never message content --- and \textbf{withhold the raw logs
+entirely}; the released artifact comprises the code and the synthetic task suite
+alone. The motivating example opening Section~\ref{sec:intro} is synthetic for
+the same reason.
 
 % ===========================================================================
 \section{Conclusion}
