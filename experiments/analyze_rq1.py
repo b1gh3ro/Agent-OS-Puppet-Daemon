@@ -125,28 +125,38 @@ def main():
         "font.family": "serif", "font.size": 8, "axes.linewidth": 0.6,
         "xtick.major.width": 0.6, "ytick.major.width": 0.6, "figure.dpi": 200,
     })
-    INK, ACC, QUIET = "#1c2b30", "#b4740f", "#2f7c79"
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(3.4, 4.15))
+    from matplotlib.ticker import NullFormatter
+    INK, ACC, QUIET, GREY = "#1c2b30", "#b4740f", "#2f7c79", "#6b6b6b"
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(3.4, 4.3))
 
     # (a) cost-latency on quiescent scenes
-    mk = {"poll": ("o", INK), "sleep": ("s", "#6b6b6b"),
-          "event": ("D", ACC), "free": ("^", QUIET)}
+    mk = {"poll": ("o", INK), "sleep": ("s", GREY), "event": ("D", ACC), "free": ("^", QUIET)}
+    pts = {}
     for a in ARMS:
         rs = [r for r in by[a] if r["regime"] == "quiescent"]
-        x = med([r.get("reaction_latency_s") for r in rs])
-        y = med([r["model_calls"] for r in rs])
+        pts[a] = (med([r.get("reaction_latency_s") for r in rs]),
+                  med([r["model_calls"] for r in rs]))
         m, c = mk[a]
-        ax1.scatter([x], [y], marker=m, s=52, color=c, zorder=3,
-                    edgecolor="white", linewidth=0.6, label=a)
-        ax1.annotate(a, (x, y), textcoords="offset points", xytext=(7, 4),
-                     fontsize=7.5, color=c)
+        ax1.scatter([pts[a][0]], [pts[a][1]], marker=m, s=54, color=c, zorder=3,
+                    edgecolor="white", linewidth=0.6)
+    # place labels individually; event and free nearly coincide, so lead them out
+    ax1.annotate("poll", pts["poll"], textcoords="offset points", xytext=(9, 1),
+                 fontsize=7.5, color=INK, va="center")
+    ax1.annotate("sleep", pts["sleep"], textcoords="offset points", xytext=(-9, 1),
+                 fontsize=7.5, color=GREY, ha="right", va="center")
+    ax1.annotate("event", pts["event"], textcoords="offset points", xytext=(16, 20),
+                 fontsize=7.5, color=ACC, va="center",
+                 arrowprops=dict(arrowstyle="-", lw=0.5, color=ACC))
+    ax1.annotate("free", pts["free"], textcoords="offset points", xytext=(20, -20),
+                 fontsize=7.5, color=QUIET, va="center",
+                 arrowprops=dict(arrowstyle="-", lw=0.5, color=QUIET))
+    ax1.set_xlim(-3, 57)
+    ax1.set_ylim(2.2, 7.9)
     ax1.set_xlabel("reaction latency (s, median)")
     ax1.set_ylabel("model calls (median)")
     ax1.set_title("(a) cost vs latency, quiescent screens", fontsize=8, loc="left")
-    ax1.margins(0.22)
     ax1.grid(True, lw=0.3, alpha=0.4)
-    ax1.text(0.03, 0.06, "cheap + fast", transform=ax1.transAxes, fontsize=6.8,
-             style="italic", color=QUIET)
+    ax1.text(2, 2.5, "cheap + fast", fontsize=6.8, style="italic", color=QUIET)
 
     # (b) event-arm degradation across the noise ladder
     xs = [NOISE_X[t] for t in TASKS if NOISE_X[t] > 0]
@@ -154,19 +164,24 @@ def main():
     order = sorted(range(len(xs)), key=lambda i: xs[i])
     xs = [xs[i] for i in order]; ys = [ys[i] for i in order]
     poll_calls = med([r["model_calls"] for r in by["poll"] if r["regime"] == "quiescent"])
-    ax2.axhline(poll_calls, ls=":", lw=1, color=INK, alpha=0.7)
-    ax2.text(xs[0], poll_calls + 0.12, "polling baseline", fontsize=6.6, color=INK)
+    ax2.plot(xs, ys, "-D", color=ACC, ms=5, lw=1.4, mec="white", mew=0.6, zorder=3)
+    ax2.axhline(poll_calls, ls=":", lw=1, color=INK, alpha=0.75)
+    ax2.text(xs[0], poll_calls - 0.18, "polling baseline", fontsize=6.6, color=INK, va="top")
     ax2.axvline(1.0, ls="--", lw=0.9, color="#999")
-    ax2.text(1.06, min(ys) + 0.1, r"wake threshold $\phi$", fontsize=6.6,
-             rotation=90, va="bottom", color="#777")
-    ax2.plot(xs, ys, "-D", color=ACC, ms=5, lw=1.3, mec="white", mew=0.6)
+    ax2.text(1.1, 3.15, r"wake threshold $\phi$", fontsize=6.6, rotation=90, va="bottom", color="#777")
     ax2.set_xscale("log")
+    ax2.set_xticks(xs)                                     # ticks only at the data
+    ax2.set_xticklabels([f"{x:g}" for x in xs])
+    ax2.xaxis.set_minor_formatter(NullFormatter())        # kill colliding minor labels
+    ax2.tick_params(axis="x", which="minor", length=0)
+    ax2.set_xlim(xs[0] * 0.72, xs[-1] * 1.5)
+    ax2.set_ylim(2.6, 7.5)
     ax2.set_xlabel(r"background noise ($\times\,\phi$, log scale)")
     ax2.set_ylabel("event-driven calls (median)")
     ax2.set_title("(b) event-driven waiting degrades with noise", fontsize=8, loc="left")
-    ax2.grid(True, lw=0.3, alpha=0.4, which="both")
+    ax2.grid(True, lw=0.3, alpha=0.4, which="major")
 
-    fig.tight_layout(pad=0.4)
+    fig.tight_layout(pad=0.5)
     dest = Path("paper/fig2.pdf")
     fig.savefig(dest, bbox_inches="tight")
     print(f"\nwrote {dest}")
