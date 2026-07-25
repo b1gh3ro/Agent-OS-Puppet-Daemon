@@ -402,22 +402,31 @@ screenshot, consistent with claims (i)--(iii) above.
 \label{sec:eval}
 % ===========================================================================
 
-\S\ref{sec:rq1} reports the cost--latency experiment and \S\ref{sec:rq3} the
-deployment observations; both are backed by data. \S\ref{sec:rq2}'s
-threshold sweep is the one protocol still to run, and is marked as such.
+The three research questions are all backed by data: \S\ref{sec:rq1} the
+cost--latency experiment, \S\ref{sec:rq2} the threshold sweep, and
+\S\ref{sec:rq3} the deployment observations.
 
 \subsection{Setup}
 \label{sec:setup}
-\textbf{Task suite.} Six synthetic waiting tasks with known ground truth: (i) a
-terminal command (\texttt{sleep 90 \&\& echo done}); (ii) a large file download
-with a progress indicator; (iii) a spinner that resolves after a fixed delay;
-(iv) a dialog that appears after a delay; (v) a visible countdown timer (a
-periodic-noise case); and (vi) a no-change control that never resolves, to
-measure timeout behavior. Ground-truth completion time is known for each,
-allowing reaction latency to be computed exactly.
+\textbf{Task suite.} Eight synthetic waiting scenes with known ground truth, in
+three groups. Three are \emph{quiescent}: a dialog that appears after a delay, a
+terminal build that prints a completion line, and a download whose banner is
+replaced on completion. Four form a \emph{noise ladder}: the same wait against
+increasing background activity (a spinner, a small and a large ticking clock, a
+scrolling log), whose amplitudes are \emph{measured} against the detector
+threshold rather than judged by eye and span from below it to well above it
+(\S\ref{sec:rq2}). One is a \emph{no-change control} that never resolves, to
+measure timeout cost and catch hallucination. Every event reveals a codeword the
+agent must echo back, so a run that never watched the screen cannot score as a
+success. The driver fires each event at a fixed point on the monotonic clock, so
+reaction latency is a subtraction, not an inference.
 
-\textbf{Conditions.} Three strategies (poll, \texttt{sleep}, event-driven)
-$\times$ six tasks $\times$ five repeats.
+\textbf{Conditions.} Four arms --- poll, \texttt{sleep}, event-driven, and a
+free-choice arm exposing both \texttt{sleep} and event-driven described neutrally
+--- each leaving the model exactly one way to express a wait (the free arm, two),
+so that any difference is architectural rather than a prompting effect. The
+prompt never names a strategy; the available primitive is set by ablating the
+toolbox. Four arms $\times$ eight scenes $\times$ five repeats $=160$ runs.
 
 \textbf{Metrics.} Model calls; prompt tokens, reported as cached and uncached
 separately; output tokens; reaction latency (ground-truth change $\rightarrow$
@@ -508,11 +517,40 @@ $O(1)$ cost, not a contradiction of it.
 
 \subsection{RQ2: change-threshold characterization}
 \label{sec:rq2}
-\todo{Fig.~3, false wakes versus missed changes as $\phi$ (\texttt{\_CHANGE\_%
-FRACTION}) sweeps, against a scene with known noise (countdown ticking) and known
-signal (dialog appears). This locates the boundary between the $O(1)$ and $O(rT)$
-regimes of \S\ref{sec:cost} and either justifies $\phi = 0.004$ or shows it is
-wrong --- the latter is equally publishable.}
+
+The threshold $\phi$ trades false wakes against missed changes. To locate that
+boundary we captured $1$\,Hz frame streams from three noise scenes and the signal
+transition, then replayed the production wake loop (Algorithm~\ref{alg:wait})
+offline at every $\phi$ --- counting false wakes on the noise and testing whether
+the real event still trips the detector. Fig.~\ref{fig:rq2} shows the result.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{fig3}
+\caption{RQ2. False wakes over a $34$\,s window as the threshold $\phi$ sweeps
+(log scale, in multiples of the production $\phi_0 = 0.4\%$), for three noise
+scenes; the dotted line marks the signal amplitude, above which the real event is
+missed. The spinner ($0.2\times\phi_0$) never trips $\phi_0$; the ticking clock
+($1.4\times$) and scrolling log ($16\times$) do, and only stop as $\phi$ is
+raised past their amplitude. The signal sits at $33.6\times\phi_0$, leaving a wide
+usable band in which no noise wakes the detector yet the event is still caught.}
+\label{fig:rq2}
+\end{figure}
+
+Two things follow. First, the false-wake curves fall to zero exactly as $\phi$
+passes each scene's measured amplitude ($0.2\times$, $1.4\times$, $16\times\phi_0$),
+confirming that $\phi$ \emph{governs} the $O(1)\!\to\!O(rT)$ boundary of
+\S\ref{sec:cost} rather than merely bounding it: a scene is quiescent-in-effect
+precisely when its amplitude sits below $\phi$. Second, the signal changes
+$33.6\times\phi_0$ of the screen --- far above every noise scene --- so any $\phi$
+in the band $[\,1.4\times,\,33.6\times\,]\phi_0$ eliminates the clock's false
+wakes while still catching the event. The production $\phi_0$ sits at the eager
+end of the safe range: it admits some false wakes on the busier scenes (which the
+model filters, \S\ref{sec:waiting}) in exchange for never missing a signal, the
+asymmetry we intended. Raising $\phi$ toward the signal amplitude would trade
+those false wakes for missed events on any scene whose real signal is smaller
+than the banner used here --- the reason we do not, and the reason a fixed scalar
+$\phi$ is a floor for future work rather than the final answer.
 
 \subsection{RQ3: deployment observations}
 \label{sec:rq3}
