@@ -1,0 +1,418 @@
+<title>Waiting Is an Action — Plain-Language Explainer</title>
+<style>
+  :root {
+    --bg:        #F4F6F5;
+    --surface:   #FFFFFF;
+    --surface-2: #ECEFEE;
+    --ink:       #131A1D;
+    --muted:     #56646A;
+    --faint:     #7C8A8F;
+    --line:      #DCE2E1;
+    --line-soft: #E7ECEB;
+    --signal:    #B4740F;   /* the event — amber, darkened for light-ground text */
+    --signal-bg: #F6E4C4;
+    --quiet:     #2F7C79;   /* the waiting state — muted teal */
+    --shadow:    0 1px 2px rgba(19,26,29,.05), 0 12px 34px -18px rgba(19,26,29,.22);
+
+    --serif: "Charter", "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, "Times New Roman", serif;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+
+    --measure: 65ch;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:        #0D1316;
+      --surface:   #131C20;
+      --surface-2: #182227;
+      --ink:       #E7EDEB;
+      --muted:     #9AA9AD;
+      --faint:     #74868B;
+      --line:      #26333A;
+      --line-soft: #1E2A30;
+      --signal:    #F0AD4E;   /* amber glows on the dark screen */
+      --signal-bg: #2A2318;
+      --quiet:     #4FB3AE;
+      --shadow:    0 1px 2px rgba(0,0,0,.4), 0 18px 40px -20px rgba(0,0,0,.6);
+    }
+  }
+  :root[data-theme="light"] {
+    --bg:#F4F6F5; --surface:#FFFFFF; --surface-2:#ECEFEE; --ink:#131A1D; --muted:#56646A;
+    --faint:#7C8A8F; --line:#DCE2E1; --line-soft:#E7ECEB; --signal:#B4740F;
+    --signal-bg:#F6E4C4; --quiet:#2F7C79;
+    --shadow:0 1px 2px rgba(19,26,29,.05), 0 12px 34px -18px rgba(19,26,29,.22);
+  }
+  :root[data-theme="dark"] {
+    --bg:#0D1316; --surface:#131C20; --surface-2:#182227; --ink:#E7EDEB; --muted:#9AA9AD;
+    --faint:#74868B; --line:#26333A; --line-soft:#1E2A30; --signal:#F0AD4E;
+    --signal-bg:#2A2318; --quiet:#4FB3AE;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 18px 40px -20px rgba(0,0,0,.6);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--serif);
+    font-size: 18px;
+    line-height: 1.68;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  .wrap { max-width: 780px; margin: 0 auto; padding: 0 24px; }
+
+  /* ---- typography ---- */
+  h1, h2, h3, .kicker, .label, .chip, .tablecard th, nav { font-family: var(--sans); }
+  h2 { font-size: clamp(1.5rem, 3.4vw, 2.05rem); line-height: 1.15; letter-spacing: -.02em;
+       font-weight: 700; text-wrap: balance; margin: 0 0 .5rem; }
+  h3 { font-size: 1.16rem; line-height: 1.3; letter-spacing: -.01em; font-weight: 650;
+       margin: 2rem 0 .35rem; }
+  p { margin: 0 0 1.05rem; max-width: var(--measure); }
+  a { color: var(--signal); text-underline-offset: 3px; text-decoration-thickness: 1px; }
+  strong { font-weight: 600; }
+  .lead { font-size: 1.24rem; line-height: 1.5; color: var(--ink); }
+  .muted { color: var(--muted); }
+  code, .mono { font-family: var(--mono); font-size: .86em; }
+  code { background: var(--surface-2); padding: .1em .38em; border-radius: 4px;
+         border: 1px solid var(--line-soft); }
+
+  .kicker { font-family: var(--mono); font-size: .72rem; letter-spacing: .22em;
+            text-transform: uppercase; color: var(--quiet); font-weight: 500; }
+
+  /* ---- section rhythm ---- */
+  section { padding: 3.4rem 0; border-top: 1px solid var(--line-soft); }
+  section:first-of-type { border-top: none; }
+  .sec-num { font-family: var(--mono); font-size: .72rem; letter-spacing: .18em;
+             text-transform: uppercase; color: var(--faint); display: block; margin-bottom: .9rem; }
+
+  /* ---- hero ---- */
+  header.hero { padding: clamp(3.5rem, 9vw, 6.5rem) 0 3rem; text-align: left; }
+  .hero .kicker { display: block; margin-bottom: 1.4rem; }
+  h1 { font-family: var(--sans); font-weight: 750; letter-spacing: -.035em;
+       font-size: clamp(2.4rem, 7vw, 4rem); line-height: 1.02; margin: 0 0 1.2rem;
+       text-wrap: balance; }
+  h1 em { font-style: normal; color: var(--signal); }
+  .hero .lead { max-width: 34ch; color: var(--muted); }
+  .byline { font-family: var(--mono); font-size: .78rem; color: var(--faint);
+            margin-top: 2rem; letter-spacing: .02em; }
+
+  /* ---- the screen demo ---- */
+  .screen {
+    margin: 2.4rem 0 .5rem; background: var(--surface); border: 1px solid var(--line);
+    border-radius: 12px; box-shadow: var(--shadow); overflow: hidden;
+  }
+  .screen__bar { display: flex; align-items: center; gap: 7px; padding: 11px 14px;
+    border-bottom: 1px solid var(--line-soft); background: var(--surface-2); }
+  .screen__bar i { width: 10px; height: 10px; border-radius: 50%; background: var(--line);
+    display: block; }
+  .screen__bar span { font-family: var(--mono); font-size: .7rem; color: var(--faint);
+    margin-left: 8px; letter-spacing: .04em; }
+  .screen__stage { min-height: 168px; display: grid; place-items: center; padding: 2rem;
+    position: relative; }
+  .screen__status { font-family: var(--mono); font-size: .95rem; color: var(--faint);
+    letter-spacing: .02em; }
+  .screen__status .cursor { display:inline-block; width:.6ch; background:var(--faint);
+    animation: blink 1.05s steps(1) infinite; margin-left:1px; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .banner {
+    font-family: var(--mono); font-weight: 600; font-size: 1.5rem; color: var(--signal);
+    background: var(--signal-bg); border: 1px solid var(--signal);
+    padding: .7rem 1.4rem; border-radius: 8px; opacity: 0; transform: scale(.94);
+  }
+  .screen.fired .screen__status { display: none; }
+  .screen.fired .banner { animation: pop .5s cubic-bezier(.2,.8,.2,1) forwards; }
+  @keyframes pop { to { opacity: 1; transform: scale(1); } }
+  .screen__meta { font-family: var(--mono); font-size: .7rem; color: var(--faint);
+    text-align: center; padding: 0 0 14px; letter-spacing: .03em; }
+
+  /* ---- callout / aside ---- */
+  .callout { background: var(--surface); border: 1px solid var(--line);
+    border-left: 3px solid var(--quiet); border-radius: 8px; padding: 1.1rem 1.3rem;
+    margin: 1.6rem 0; box-shadow: var(--shadow); }
+  .callout p { margin: 0; }
+  .callout p + p { margin-top: .7rem; }
+  .callout.signal { border-left-color: var(--signal); }
+  .callout .label { font-family: var(--mono); font-size: .68rem; letter-spacing: .16em;
+    text-transform: uppercase; color: var(--faint); display: block; margin-bottom: .5rem; }
+
+  /* ---- strategy cards ---- */
+  .cards { display: grid; gap: 14px; margin: 1.8rem 0; }
+  @media (min-width: 720px) { .cards { grid-template-columns: repeat(3, 1fr); } }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+    padding: 1.2rem 1.15rem; box-shadow: var(--shadow); display: flex; flex-direction: column; }
+  .card .chip { font-family: var(--mono); font-size: .74rem; font-weight: 600;
+    letter-spacing: .02em; padding: .18em .5em; border-radius: 5px; align-self: flex-start;
+    background: var(--surface-2); border: 1px solid var(--line-soft); margin-bottom: .7rem; }
+  .card h3 { margin: 0 0 .4rem; font-size: 1.02rem; }
+  .card p { font-size: .92rem; line-height: 1.55; color: var(--muted); margin: 0; font-family: var(--serif); }
+  .card .cost { margin-top: .9rem; padding-top: .8rem; border-top: 1px solid var(--line-soft);
+    font-family: var(--mono); font-size: .8rem; color: var(--ink); }
+  .card .cost b { color: var(--signal); font-weight: 600; }
+  .card.event .chip { color: var(--signal); border-color: var(--signal); background: var(--signal-bg); }
+
+  /* ---- comparison table ---- */
+  .table-scroll { overflow-x: auto; margin: 1.6rem 0; -webkit-overflow-scrolling: touch; }
+  table.tablecard { border-collapse: collapse; width: 100%; min-width: 520px;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+    overflow: hidden; box-shadow: var(--shadow); font-size: .9rem; }
+  .tablecard th, .tablecard td { text-align: left; padding: .72rem .95rem;
+    border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+  .tablecard thead th { font-size: .72rem; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--faint); font-weight: 600; background: var(--surface-2); }
+  .tablecard tbody th { font-family: var(--mono); font-weight: 600; color: var(--ink);
+    font-size: .84rem; white-space: nowrap; }
+  .tablecard td { color: var(--muted); font-family: var(--serif); }
+  .tablecard tr:last-child th, .tablecard tr:last-child td { border-bottom: none; }
+  .num { font-variant-numeric: tabular-nums; }
+
+  /* ---- stat strip ---- */
+  .stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1px;
+    background: var(--line-soft); border: 1px solid var(--line); border-radius: 10px;
+    overflow: hidden; margin: 1.8rem 0; box-shadow: var(--shadow); }
+  @media (min-width: 640px) { .stats { grid-template-columns: repeat(4, 1fr); } }
+  .stat { background: var(--surface); padding: 1.1rem 1.15rem; }
+  .stat .n { font-family: var(--sans); font-weight: 720; font-size: 1.7rem; letter-spacing: -.02em;
+    color: var(--ink); font-variant-numeric: tabular-nums; line-height: 1; }
+  .stat .n .u { font-size: .95rem; font-weight: 600; color: var(--muted); margin-left: 2px; }
+  .stat .k { font-family: var(--mono); font-size: .68rem; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--faint); margin-top: .5rem; }
+  .stat.hero-stat .n { color: var(--signal); }
+
+  /* ---- ladder ---- */
+  .ladder { margin: 1.6rem 0; display: grid; gap: 8px; }
+  .rung { display: grid; grid-template-columns: 88px 1fr auto; align-items: center; gap: 14px;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 8px;
+    padding: .6rem .9rem; box-shadow: var(--shadow); }
+  .rung .amt { font-family: var(--mono); font-weight: 600; font-size: .82rem; color: var(--ink);
+    font-variant-numeric: tabular-nums; }
+  .rung .bar { height: 8px; border-radius: 4px; background: var(--quiet); opacity: .85; }
+  .rung.over .bar { background: var(--signal); }
+  .rung .tag { font-family: var(--mono); font-size: .68rem; letter-spacing: .04em;
+    color: var(--faint); white-space: nowrap; }
+  .rung.over .tag { color: var(--signal); }
+  .rung.threshold { background: transparent; border: none; box-shadow: none; padding: .1rem .9rem;
+    grid-template-columns: 1fr; }
+  .rung.threshold span { font-family: var(--mono); font-size: .7rem; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--faint); border-top: 1px dashed var(--line);
+    padding-top: .6rem; display: block; }
+
+  ul.clean { max-width: var(--measure); padding-left: 1.1rem; margin: 0 0 1.05rem; }
+  ul.clean li { margin-bottom: .55rem; }
+  ul.clean li::marker { color: var(--quiet); }
+
+  footer { border-top: 1px solid var(--line); padding: 2.6rem 0 4rem; }
+  footer .kicker { color: var(--faint); }
+  footer p { font-size: .92rem; color: var(--muted); }
+
+  @media (prefers-reduced-motion: reduce) {
+    .screen__status .cursor { animation: none; }
+    .screen.fired .banner, .banner { animation: none; opacity: 1; transform: none; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="hero">
+    <span class="kicker">A plain-language companion to the paper</span>
+    <h1>Doing nothing is<br>the <em>expensive</em> part.</h1>
+    <p class="lead">What happens when you ask an AI to <em>wait</em> — and why that turns out to cost real money, unless you build it differently.</p>
+
+    <div class="screen" id="demo">
+      <div class="screen__bar"><i></i><i></i><i></i><span>sandbox desktop · :99</span></div>
+      <div class="screen__stage">
+        <div class="screen__status">watching the screen<span class="cursor">&nbsp;</span></div>
+        <div class="banner">DONE-7Q2</div>
+      </div>
+      <div class="screen__meta" id="demo-meta">the screen sits perfectly still — until, ninety seconds later, it doesn't</div>
+    </div>
+
+    <p class="byline">Waiting Is an Action: Event-Driven Time Primitives for Long-Horizon GUI Agents · Saad Mujeeb</p>
+  </header>
+
+  <section>
+    <span class="sec-num">01 — The story</span>
+    <h2>An AI that watches a screen</h2>
+    <p>This paper is about a certain kind of AI program — an <strong>agent</strong> — that controls a computer the way a person does. It looks at the screen as a picture, moves the mouse, types, clicks. It doesn't get a special data feed from the apps it uses; it only sees the pixels, exactly what you'd see. You give it a goal in plain English and it works toward it, one action at a time.</p>
+    <p>Now picture a very ordinary task: <em>“Wait for my colleague to reply, then act on it.”</em> The reply arrives in thirty minutes. The actual work — read the message, write an answer, send it — is maybe four actions. The other thirty minutes are spent doing nothing.</p>
+    <p>That “doing nothing” is the whole story. It sounds free. It isn't.</p>
+  </section>
+
+  <section>
+    <span class="sec-num">02 — Why waiting costs money</span>
+    <h2>The AI can't just “sit there”</h2>
+    <p>Here's the catch that most people never think about. These agents are built as a loop: <em>look at the screen → think → take one action → repeat.</em> There is no step in that loop called “wait.” The only way for the agent to let time pass is to keep taking actions — so it takes the emptiest action it can: <strong>look again.</strong></p>
+    <p>Take a screenshot. Ask the AI, <em>“has anything changed?”</em> No. Wait a moment. Take another screenshot. Ask again. No. Again. No. This is called <strong>polling</strong>, and it's how an agent “waits” when nothing lets it truly pause.</p>
+    <div class="callout signal">
+      <span class="label">The expensive detail</span>
+      <p>Every one of those “has anything changed?” checks is a <strong>full request to the AI model</strong> — the slow, costly part. A computer checking a file does this millions of times a second for free. But when the thing doing the checking is a large AI model, each check costs real money and real seconds.</p>
+      <p>So the cost of waiting grows with <strong>how long you wait</strong>. Wait twice as long, pay twice as much — to learn, over and over, that nothing happened yet.</p>
+    </div>
+    <p>Browsers solved this problem years ago. Tools like Playwright can say “wait until this button appears” and quietly block until it does — no wasted checks. But that trick needs access to the page's underlying structure. An agent that only sees <em>pixels</em> has no structure to query. The clean solution exists everywhere except for exactly the agents that need it most.</p>
+  </section>
+
+  <section>
+    <span class="sec-num">03 — The idea</span>
+    <h2>Waiting is an action too</h2>
+    <p>The paper's core insight is one sentence: <strong>waiting is itself an action — and unlike other actions, the AI doesn't need to be awake while it happens.</strong></p>
+    <p>Nothing requires the expensive model to be present while time passes. If a cheap watcher can keep an eye on the screen and only wake the AI when something actually changes, then the number of costly model calls stops depending on how long you wait. Thirty seconds or three hours — it's still just <em>one</em> wake-up when the moment arrives.</p>
+    <p>The paper builds and compares <strong>three different ways to wait</strong>, and is honest about when each one wins.</p>
+
+    <div class="cards">
+      <div class="card poll">
+        <span class="chip">poll</span>
+        <h3>Keep looking</h3>
+        <p>The default. Take a screenshot, ask the AI if anything changed, repeat. Simple and always works — but you pay the model on every single check.</p>
+        <div class="cost">cost while waiting: <b>grows with time</b></div>
+      </div>
+      <div class="card sleep">
+        <span class="chip">sleep</span>
+        <h3>Set a timer</h3>
+        <p>The AI says “wake me in N minutes” and truly pauses — one call, no matter how long. Cheap, but it has to <em>guess the time in advance</em>: too short and it misses; too long and it wastes minutes.</p>
+        <div class="cost">cost while waiting: <b>one call</b></div>
+      </div>
+      <div class="card event">
+        <span class="chip">watch</span>
+        <h3>Watch for change</h3>
+        <p>A cheap watcher stares at the screen and wakes the AI the instant it visibly changes. No guessing the time, no wasted checks — the best of both, on a calm screen.</p>
+        <div class="cost">cost while waiting: <b>one call + surprises</b></div>
+      </div>
+    </div>
+
+    <p>The third one — <strong>watch for change</strong> — is the paper's new contribution: a pixel-level version of the browser trick, for agents that only see pixels.</p>
+  </section>
+
+  <section>
+    <span class="sec-num">04 — How the watcher works</span>
+    <h2>Noticing that the screen changed</h2>
+    <p>The watcher is deliberately dumb, because dumb is cheap. It shrinks the screen to a tiny <span class="mono">240×152</span> grey thumbnail and, once a second, compares it to the previous one. A pixel “counts” as changed only if it shifts noticeably. The screen as a whole counts as changed only if <strong>more than 0.4% of pixels moved</strong> at once.</p>
+    <p>That threshold is chosen to be eager but not jumpy: a new chat bubble popping up should trip it; a blinking text cursor or a nudged mouse pointer — just a few pixels — should not. When it trips, it wakes the AI exactly once, hands over one fresh screenshot, and the AI decides what to do. <strong>No AI model runs at all during the wait itself.</strong></p>
+  </section>
+
+  <section>
+    <span class="sec-num">05 — The honest catch</span>
+    <h2>What happens on a busy screen</h2>
+    <p>The “watch for change” idea has a real weakness, and the paper leads with it rather than hiding it. The watcher can't tell a <em>meaningful</em> change from a <em>meaningless</em> one. It only knows “pixels moved.”</p>
+    <p>On a calm screen this is perfect — nothing moves until the thing you're waiting for happens, so the AI wakes up exactly once. But put a ticking clock, a scrolling log, or a video in the corner, and the watcher keeps waking the AI for changes it doesn't care about. Each false alarm is a full, paid model call. In the worst case — constant motion — it degrades right back into expensive polling, or even worse.</p>
+    <div class="callout">
+      <span class="label">The claim, stated fairly</span>
+      <p>“Watch for change” is cheap <strong>on a quiet screen</strong>, and gets more expensive as the screen gets busier. That trade-off — <em>where exactly</em> the switch from cheap to expensive happens — is the thing the experiments are built to measure. It's the contribution, not a footnote.</p>
+    </div>
+  </section>
+
+  <section>
+    <span class="sec-num">06 — The machine</span>
+    <h2>How it was built</h2>
+    <p>The setup has three parts, kept deliberately simple because the plumbing isn't the point — the waiting idea is.</p>
+    <ul class="clean">
+      <li><strong>A sandbox.</strong> A throwaway Linux desktop running inside Docker — its own isolated screen, keyboard, and mouse, with no access to the real computer's files. This is the screen the agent sees and controls.</li>
+      <li><strong>A brain.</strong> The part that runs the look–think–act loop, powered by Google's Gemini “computer-use” model. It's what decides where to click and, now, how to wait.</li>
+      <li><strong>A daemon.</strong> A small background service that hands out jobs, keeps a record of every step, and — crucially — runs the cheap “watch for change” loop <em>outside</em> the expensive model.</li>
+    </ul>
+    <p>One detail matters more than it seems: the agent only gets a screenshot <strong>when it asks for one</strong> — it isn't watching a live video. That's exactly why plain polling is so costly, and it's true of essentially every pixel-based agent, not just this one.</p>
+  </section>
+
+  <section>
+    <span class="sec-num">07 — The experiment</span>
+    <h2>How the tests are run</h2>
+    <p>To compare the three waiting styles fairly, the experiment builds little scenes where <strong>exactly one thing happens, at a moment the test controls.</strong> Because the test itself triggers that event and notes the instant it did, the agent's reaction time can be <em>measured</em> rather than guessed.</p>
+
+    <h3>The eight scenes</h3>
+    <p>Each scene shows the agent a screen and asks it to report a hidden <strong>codeword</strong> the moment it appears — a small trick that stops a lazy agent from just claiming “done” without ever looking. The scenes range from perfectly calm to deliberately chaotic:</p>
+    <ul class="clean">
+      <li>Three <strong>calm</strong> scenes — a dialog box pops up, a build finishes in a terminal, a download completes.</li>
+      <li>Four <strong>noise-ladder</strong> scenes — the same wait, but with increasing background fidget (a spinner, a ticking clock, a scrolling log), from barely-there to overwhelming.</li>
+      <li>One <strong>control</strong> — where nothing <em>ever</em> happens, to see what each strategy costs when the thing you're waiting for simply never arrives (and to catch an agent that hallucinates seeing something).</li>
+    </ul>
+
+    <h3>The noise ladder</h3>
+    <p>“Busy” isn't judged by eye — it's <em>measured</em>, as a multiple of the watcher's 0.4% threshold. This is the clever bit: two scenes sit below the line (the watcher rightly ignores them) and two sit above it (false alarms begin). The ladder pins down <em>where</em> cheap turns into expensive.</p>
+    <div class="ladder">
+      <div class="rung"><span class="amt num">0.26×</span><div class="bar" style="width:12%"></div><span class="tag">spinner + clock · ignored</span></div>
+      <div class="rung"><span class="amt num">0.58×</span><div class="bar" style="width:26%"></div><span class="tag">spinner · ignored</span></div>
+      <div class="rung threshold"><span>— the watcher's wake-up line (0.4% of the screen) —</span></div>
+      <div class="rung over"><span class="amt num">1.54×</span><div class="bar" style="width:52%"></div><span class="tag">big clock · false alarms</span></div>
+      <div class="rung over"><span class="amt num">7.87×</span><div class="bar" style="width:96%"></div><span class="tag">scrolling log · chaos</span></div>
+    </div>
+    <p class="muted" style="font-size:.9rem">The real event, by contrast, changes about <span class="mono">29×</span> the threshold — impossible to miss in any scene.</p>
+
+    <h3>Keeping it a fair fight</h3>
+    <p>A few rules make the comparison honest:</p>
+    <ul class="clean">
+      <li><strong>The instructions never hint at a strategy.</strong> The agent is simply told “watch and report.” Which waiting tool it's <em>allowed</em> to use is controlled behind the scenes — so the test measures the tool, not a nudge in the wording.</li>
+      <li><strong>Four setups run against each scene:</strong> poll-only, sleep-only, watch-only, and a fourth <strong>free-choice</strong> setup where the agent is handed both tools, described neutrally, to see which it picks on its own.</li>
+      <li><strong>The agent can't cheat.</strong> Its shortcut tools (like opening a terminal to script its own timer) are removed, forcing it to actually watch the screen.</li>
+      <li><strong>Time is measured with an internal stopwatch,</strong> never wall-clock. On a laptop that sleeps, wall-clock lies wildly — in the real deployment logs, host sleep inflated the apparent time by 22 hours. The internal clock is immune.</li>
+    </ul>
+
+    <div class="stats">
+      <div class="stat hero-stat"><div class="n num">160</div><div class="k">total runs</div></div>
+      <div class="stat"><div class="n num">4</div><div class="k">waiting setups</div></div>
+      <div class="stat"><div class="n num">8</div><div class="k">scenes each</div></div>
+      <div class="stat"><div class="n num">5</div><div class="k">repeats each</div></div>
+    </div>
+    <p class="muted" style="font-size:.9rem">4 setups × 8 scenes × 5 repeats = 160 measured runs. This batch is running right now.</p>
+  </section>
+
+  <section>
+    <span class="sec-num">08 — The three questions</span>
+    <h2>What the numbers should show</h2>
+    <div class="table-scroll">
+      <table class="tablecard">
+        <thead>
+          <tr><th>Strategy</th><th>Cost while waiting</th><th>Reaction speed</th><th>The catch</th></tr>
+        </thead>
+        <tbody>
+          <tr><th>poll</th><td>grows with wait length</td><td>fast</td><td>you pay the model non-stop</td></tr>
+          <tr><th>sleep</th><td>one call, flat</td><td>slow (overshoots)</td><td>must guess the time upfront</td></tr>
+          <tr><th>watch</th><td>one call on a calm screen</td><td>fast (within a second)</td><td>false alarms on a busy screen</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>The prediction, written down <em>before</em> the tests were run: on the calm scenes, <strong>watch</strong> should be both cheap and fast — winning on every axis. As the noise ladder climbs past the threshold, watch should start racking up false alarms and drift toward the cost of polling. <strong>Sleep</strong> should stay cheap but react late. <strong>Poll</strong> should react quickly but cost the most. If the prediction is wrong, the paper commits to reporting that too.</p>
+  </section>
+
+  <section>
+    <span class="sec-num">09 — From the real world</span>
+    <h2>This isn't a corner case</h2>
+    <p>Before any of the controlled tests, the system was simply <em>used</em> — 63 real jobs over many hours of genuine work. That data isn't a clean experiment, and the paper is careful to say so. But it establishes one thing the polished benchmarks miss entirely:</p>
+    <div class="stats">
+      <div class="stat hero-stat"><div class="n num">32<span class="u">%</span></div><div class="k">of active time waiting</div></div>
+      <div class="stat"><div class="n num">63</div><div class="k">real runs</div></div>
+      <div class="stat"><div class="n num">19.1<span class="u">h</span></div><div class="k">of agent work</div></div>
+      <div class="stat"><div class="n num">3,893</div><div class="k">actions taken</div></div>
+    </div>
+    <p><strong>Nearly a third of the agent's working time was spent waiting.</strong> The standard benchmarks used to grade these agents run for a few minutes and never measure this at all — which is exactly why the cost of waiting has gone uncharacterized, and why this paper exists.</p>
+  </section>
+
+  <footer>
+    <span class="kicker">In one sentence</span>
+    <p style="max-width:60ch; margin-top:.8rem">Today's AI agents can't say “wait” — so they wait by repeatedly, expensively looking. Move the watching to a cheap process outside the model, and the cost of doing nothing stops growing with the clock. The interesting part isn't the trick; it's knowing exactly when the trick stops working.</p>
+  </footer>
+
+</div>
+
+<script>
+  // One orchestrated moment: the screen waits, then the event fires — the whole
+  // thesis in three seconds. Honors reduced-motion by showing the fired state.
+  (function () {
+    var demo = document.getElementById('demo');
+    var meta = document.getElementById('demo-meta');
+    if (!demo) return;
+    var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    function fire() {
+      demo.classList.add('fired');
+      if (meta) meta.textContent = 'the watcher wakes the AI — one call, and only now';
+    }
+    if (reduce) { fire(); return; }
+    var fired = false;
+    function run() { if (!fired) { fired = true; setTimeout(fire, 2600); } }
+    // Fire once the demo is on screen, so the reveal isn't missed on load.
+    if ('IntersectionObserver' in window) {
+      var io = new IntersectionObserver(function (es) {
+        es.forEach(function (e) { if (e.isIntersecting) { run(); io.disconnect(); } });
+      }, { threshold: .4 });
+      io.observe(demo);
+    } else { run(); }
+  })();
+</script>
