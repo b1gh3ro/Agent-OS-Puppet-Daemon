@@ -46,28 +46,25 @@ professor.hameed@gmail.com}
 \begin{abstract}
 Graphical user interface (GUI) agents are evaluated almost exclusively on tasks
 that complete within minutes, yet real desktop work is punctuated by waiting:
-for a reply, a download, a build, or a person. We observe that current agent
-architectures have no way to express duration. The ReAct loop models an agent as
-a sequence of actions, so an agent that must wait can only emit repeated no-op
-actions and re-examine the screen --- polling. When the poller is a language
-model, each poll costs a full model round-trip, and the cost of waiting scales
-with wall-clock duration. Browser automation solved this long ago with
-event-driven primitives such as Playwright's \texttt{wait\_for\_selector}, but
-those require a DOM; an agent that perceives only pixels has no equivalent. We
-contribute the pixel-level analogue: waiting as a first-class action, with fixed
-(\texttt{sleep}) and event-driven (\texttt{wait\_for\_screen\_change})
-primitives evaluated server-side, outside the model loop. Event-driven waiting
-reduces waiting from $O(T/p)$ model calls to $O(1)$ \emph{on a quiescent
-screen}, degrading toward polling as screen activity rises --- a trade-off we
-characterize rather than hide. Across a controlled experiment of four waiting
-strategies over eight screens, event-driven waiting matches polling's
-sub-10-second reaction at a median of $3$ model calls against polling's $7$ ---
-as responsive as polling at under half the cost on a quiescent screen --- while
-degrading to $5$--$6$ calls once on-screen noise crosses the detector's
-threshold. Given both a fixed and an event-driven primitive under a neutral
-prompt, the agent chose the event-driven one in $84\%$ of waits.
-In a 19.1-hour, 63-run deployment, 32\% of active agent time was spent waiting,
-which suggests the regime is not a corner case.
+for a reply, a download, a build, or a person. Current agent architectures have
+no way to express duration. The ReAct loop models an agent as a sequence of
+actions, so an agent that must wait can only poll: emit a no-op action and
+re-examine the screen. When the poller is a language model, each poll costs a
+full model round-trip, so the cost of waiting scales with wall-clock duration.
+Browser automation solved this long ago with event-driven primitives such as
+Playwright's \texttt{wait\_for\_selector}, but those require a DOM, and an agent
+that perceives only pixels has no equivalent. We contribute the pixel-level
+analogue: waiting as a first-class action, with fixed (\texttt{sleep}) and
+event-driven (\texttt{wait\_for\_screen\_change}) primitives evaluated
+server-side, outside the model loop. Event-driven waiting reduces waiting from
+$O(T/p)$ model calls to $O(1)$ on a quiescent screen, and degrades toward polling
+as screen activity rises. Across a controlled experiment of four waiting
+strategies over eight screens, it matches polling's sub-10-second reaction at a
+median of $3$ model calls against polling's $7$, then rises to $5$--$6$ calls
+once on-screen noise crosses the detector's threshold. Given both a fixed and an
+event-driven primitive under a neutral prompt, the agent chose the event-driven
+one in $84\%$ of waits. In a 19.1-hour, 63-run deployment, $32\%$ of active agent
+time was spent waiting, so the pattern is not a corner case.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -81,17 +78,16 @@ agent architectures, cost analysis
 % ===========================================================================
 
 Consider an agent asked to watch for a colleague's reply and act on it. The
-reply arrives in thirty minutes. The agent's actual work --- read the message,
-draft an answer, send it --- takes four actions. The other thirty minutes are
-spent doing nothing, and doing nothing is the expensive part.
+reply arrives in thirty minutes. The agent's actual work, reading the message,
+drafting an answer, and sending it, takes four actions. The other thirty minutes
+are spent doing nothing, and that is the expensive part.
 
-This is not the regime that GUI agent research measures. Benchmarks such as
+This is not the setting that GUI agent research measures. Benchmarks such as
 WindowsAgentArena~\cite{waa}, OSWorld~\cite{osworld}, and WebArena~\cite{webarena}
 evaluate tasks that finish in minutes and score them on success rate. They report
-neither wall-clock duration nor the token cost of waiting, because in their
-regime waiting is negligible. In deployment it is not: in the 63-run deployment
-we describe in Section~\ref{sec:eval}, waiting consumed 32\% of active agent
-time.
+neither wall-clock duration nor the token cost of waiting, because for such tasks
+waiting is negligible. In deployment it is not: in the 63-run deployment we
+describe in Section~\ref{sec:eval}, waiting consumed 32\% of active agent time.
 
 \subsection{The gap}
 The dominant agent architecture, ReAct~\cite{react}, models an agent as an
@@ -114,8 +110,8 @@ settled it decades ago, and browser automation frameworks such as
 Playwright~\cite{playwright} and Selenium~\cite{selenium} have long exposed
 event-driven waits like \texttt{wait\_for\_selector}. We claim no novelty in the
 mechanism. What differs is the setting. A \texttt{select()} poll costs a syscall;
-a poll in an agent loop costs a language model inference --- several orders of
-magnitude more, in both money and latency. A cost that is ignorable at syscall
+a poll in an agent loop costs a language model inference, several orders of
+magnitude more in both money and latency. A cost that is ignorable at syscall
 scale becomes the dominant term at model scale. Moreover, the browser-automation
 solution does not transfer: \texttt{wait\_for\_selector} needs a DOM, and a
 vision-language agent that perceives the screen as pixels has no DOM to query.
@@ -131,9 +127,9 @@ from the duration.
 
 We contribute:
 \begin{itemize}
-  \item \textbf{C1.} A characterization of three waiting strategies --- polling,
-  fixed server-side (\texttt{sleep}), and event-driven
-  (\texttt{wait\_for\_screen\_change}) --- and a pixel-level event-driven waiting
+  \item \textbf{C1.} A characterization of three waiting strategies (polling,
+  fixed server-side \texttt{sleep}, and event-driven
+  \texttt{wait\_for\_screen\_change}) and a pixel-level event-driven waiting
   primitive for agents without DOM access (Section~\ref{sec:waiting}).
   \item \textbf{C2.} An empirical cost--latency comparison of the three
   strategies, and a characterization of the change-detection threshold that
@@ -179,8 +175,8 @@ predicate holds, evaluated in the driver rather than the client. This is exactly
 the right design, and it is the design we port. The obstacle is representational:
 these predicates are expressed over the DOM. A vision-language agent observes a
 rendered bitmap and has no queryable structure, so the predicate must be
-expressed over pixels instead --- which introduces a false-wake regime that the
-DOM formulation does not have, and which Section~\ref{sec:waiting} makes explicit.
+expressed over pixels instead. This introduces a false-wake failure mode that the
+DOM formulation does not have, which Section~\ref{sec:waiting} makes explicit.
 
 \subsection{Benchmarks}
 \label{sec:gap}
@@ -188,16 +184,16 @@ WindowsAgentArena~\cite{waa}, OSWorld~\cite{osworld}, WebArena~\cite{webarena},
 and ScreenSpot~\cite{seeclick} are the standard evaluations for GUI agents. Each
 reports task success rate. \emph{None reports wall-clock duration, and none
 reports the token cost of waiting.} This is a reasonable omission for tasks that
-complete in minutes, and it is precisely why the long-horizon cost regime remains
+complete in minutes, and it is why the long-horizon cost of waiting remains
 uncharacterized. Our work targets that gap.
 
 % ===========================================================================
 \section{System}
 % ===========================================================================
 
-We evaluate within a small agent runtime. \textbf{The runtime is not a
-contribution of this paper} --- it follows established practice, and we describe
-it only enough to make the measurements reproducible.
+We evaluate within a small agent runtime. The runtime is not a contribution of
+this paper; it follows established practice, and we describe it only enough to
+make the measurements reproducible.
 
 The system has three parts (Fig.~\ref{fig:arch}). A \emph{daemon} (Python, asyncio, HTTP on port 8420)
 owns the task queue and exposes control endpoints. A \emph{brain} implements a
@@ -205,8 +201,8 @@ ReAct loop against the Gemini computer-use tool. A \emph{sandbox} (Docker, Xvfb,
 openbox, \texttt{xdotool}, \texttt{scrot}) provides an isolated X11 desktop; this
 recipe follows Anthropic's reference implementation~\cite{anthropic}.
 
-One design property is load-bearing later: \textbf{screenshots are captured on
-demand, one per decision, not streamed.} The agent's perception is a discrete
+One design property matters for what follows: screenshots are captured on
+demand, one per decision, not streamed. The agent's perception is a discrete
 sequence of frames requested at action boundaries. Consequently an agent that
 wants to know whether the screen has changed must \emph{ask}, and asking is a
 model round-trip. This is what makes polling expensive, and it is a property of
@@ -270,12 +266,12 @@ implementation.
 }
 \caption{System architecture. The \emph{decision} loop (left, solid) spends one
 Gemini inference per step: the sandbox returns a screenshot on demand, the brain
-reasons and emits an action. The \emph{wait} loop (right) is the contribution:
+reasons and emits an action. The \emph{wait} loop (right) is the new part:
 the brain hands off to a runtime watcher that diffs $1$\,Hz screenshots against a
 baseline (Eq.~\ref{eq:change}) and re-enters the model exactly once, with one
 fresh frame, when the screen changes. \textbf{No model call occurs while time
 passes.} Screenshots are captured per decision, never streamed, which is why
-polling---re-asking the model whether anything changed---costs a full round-trip
+polling, re-asking the model whether anything changed, costs a full round-trip
 each time.}
 \label{fig:arch}
 \end{figure}
@@ -379,29 +375,28 @@ Server compute     & $O(1)$              & $O(1)$     & $O(T)$ diffs \\
 \end{tabular}
 \end{table}
 
-Two honest qualifications follow, both of which a careful reviewer would raise.
+Two qualifications matter.
 
 \paragraph{$O(1)$ is conditional, not unconditional}
 Event-driven waiting costs $1 + F$ model calls, where $F$ counts wakes on changes
 irrelevant to the agent's goal. $F$ is not a constant. On a quiescent screen
 $F \approx 0$ and the cost is genuinely $O(1)$. But on a screen with periodic
-activity --- a ticking clock, an animated spinner, an unrelated notification ---
-false wakes arrive at some rate $r$, giving $F \approx rT$ and a cost of $O(rT)$.
-In the limit of continuous motion (video playback), event-driven waiting fires
-every frame and \emph{collapses into polling, but worse}: every wake is a full
-model call, with no interval $p$ to bound the rate. The correct statement of our
-claim is therefore: \textbf{$O(1)$ model calls on a quiescent screen, degrading
-toward polling as screen activity rises.} Section~\ref{sec:rq2} measures where
-that boundary lies; it is the central trade-off of the design, not a footnote.
+activity (a ticking clock, an animated spinner, an unrelated notification) false
+wakes arrive at some rate $r$, giving $F \approx rT$ and a cost of $O(rT)$. In the
+limit of continuous motion (video playback), event-driven waiting fires every
+frame and \emph{collapses into polling, but worse}: every wake is a full model
+call, with no interval $p$ to bound the rate. The claim is therefore $O(1)$ model
+calls on a quiescent screen, degrading toward polling as screen activity rises.
+Section~\ref{sec:rq2} measures where that boundary lies.
 
 \paragraph{Prompt caching complicates the token model}
 Equation~(\ref{eq:poll}) counts \emph{model calls}, and that count is exact.
 Translating it into \emph{tokens} is not straightforward, because providers
 implicitly cache repeated prompt prefixes, so successive polls may bill less than
 their nominal prompt size. The precise claims are: (i) model calls remain
-$\lceil T/p \rceil$ --- caching does not remove round-trips; (ii) each call still
-pays its uncached delta, which includes the new screenshot, the expensive part;
-and (iii) each call still pays its full latency. We therefore instrument and
+$\lceil T/p \rceil$, since caching does not remove round-trips; (ii) each call
+still pays its uncached delta, which includes the new screenshot, the expensive
+part; and (iii) each call still pays its full latency. We therefore instrument and
 report cached and uncached prompt tokens separately, and treat \textbf{model
 calls and latency as primary metrics}, since neither can be deflated by caching.
 Under the RQ1 workload, implicit caching does materialize but only partially:
@@ -434,10 +429,10 @@ agent must echo back, so a run that never watched the screen cannot score as a
 success. The driver fires each event at a fixed point on the monotonic clock, so
 reaction latency is a subtraction, not an inference.
 
-\textbf{Conditions.} Four arms --- poll, \texttt{sleep}, event-driven, and a
-free-choice arm exposing both \texttt{sleep} and event-driven described neutrally
---- each leaving the model exactly one way to express a wait (the free arm, two),
-so that any difference is architectural rather than a prompting effect. The
+\textbf{Conditions.} Four arms: poll, \texttt{sleep}, event-driven, and a
+free-choice arm that exposes both \texttt{sleep} and event-driven described
+neutrally. Each leaves the model exactly one way to express a wait (the free arm,
+two), so that any difference is architectural rather than a prompting effect. The
 prompt never names a strategy; the available primitive is set by ablating the
 toolbox. Four arms $\times$ eight scenes $\times$ five repeats $=160$ runs.
 
@@ -446,10 +441,10 @@ separately; output tokens; reaction latency (ground-truth change $\rightarrow$
 first agent action); and task wall-clock.
 
 \textbf{Measurement of duration.} All durations are recorded with an in-process
-monotonic clock, never as differences of wall-clock timestamps. This is not
-pedantry. In our deployment logs (\S\ref{sec:rq3}), host suspend inflated
-wall-clock spans by 22 hours across 63 runs --- 54\% of the naive total --- while
-in-process durations were unaffected. A wait that reports 19\,s of elapsed loop
+monotonic clock, never as differences of wall-clock timestamps. This matters. In
+our deployment logs (\S\ref{sec:rq3}), host suspend inflated wall-clock spans by
+22 hours across 63 runs (54\% of the naive total), while in-process durations
+were unaffected. A wait that reports 19\,s of elapsed loop
 time may span 10 hours of wall-clock if the host sleeps in between. \emph{On a
 suspendable host, wall-clock deltas are not durations.} Experiments are run on a
 host with suspend disabled.
@@ -489,44 +484,40 @@ waiting occupy the cheap-and-fast corner: polling's $\leq$10\,s reaction at a
 third of \texttt{sleep}'s latency and under half of polling's model calls.
 \textbf{(b)} The event-driven arm's cost as background noise sweeps across the
 detector threshold $\phi$: flat at the $O(1)$ floor while noise sits below
-$\phi$, rising toward the polling baseline above it --- the predicted
+$\phi$, rising toward the polling baseline above it, the predicted
 $O(1)\!\to\!O(rT)$ transition, located between $0.58\times$ and $1.54\times\phi$.}
 \label{fig:rq1}
 \end{figure}
 
-\textbf{Cost and latency.} Polling spends a median of $7$ model calls per wait;
-\texttt{sleep}, event-driven, and free-choice each spend $3$. Reaction latency
-separates them the other way: polling and event-driven both react in under
-$9$\,s, while \texttt{sleep} reacts in $45.7$\,s --- the overshoot of a fixed
-guess. Event-driven waiting thus lands where the cost model predicted, matching
-polling's responsiveness at less than half its model calls
-(Fig.~\ref{fig:rq1}a).
+Polling spends a median of $7$ model calls per wait, while \texttt{sleep},
+event-driven, and free-choice each spend $3$. Reaction latency separates them the
+other way: polling and event-driven both react in under $9$\,s, while
+\texttt{sleep} reacts in $45.7$\,s, the overshoot of a fixed guess. Event-driven
+waiting lands where the cost model predicted, matching polling's responsiveness at
+less than half its model calls (Fig.~\ref{fig:rq1}a).
 
-\textbf{Degradation with noise.} Fig.~\ref{fig:rq1}b sweeps the event-driven arm
-across the noise ladder. Below the detector threshold ($0.26\times$ and
-$0.58\times\phi$) it holds the $O(1)$ floor of $3$ calls, indistinguishable from
-a still screen: motion that \emph{looks} busy but stays under $\phi$ costs
-nothing. Above the threshold it degrades --- $5$ calls at $1.54\times$, $6$ at
-$7.87\times$ --- climbing toward polling's $7$ exactly as $O(1)\!\to\!O(rT)$
-predicts. The transition sits where the ladder crosses $\phi$, confirming the
-threshold governs the trade-off rather than merely bounding it.
+Fig.~\ref{fig:rq1}b sweeps the event-driven arm across the noise ladder. Below the
+detector threshold, at $0.26\times$ and $0.58\times\phi$, it holds the $O(1)$
+floor of $3$ calls, indistinguishable from a still screen: motion that
+\emph{looks} busy but stays under $\phi$ costs nothing. Above the threshold it
+degrades, to $5$ calls at $1.54\times$ and $6$ at $7.87\times$, climbing toward
+polling's $7$ as $O(1)\!\to\!O(rT)$ predicts. The transition sits where the ladder
+crosses $\phi$, so the threshold governs the trade-off rather than merely bounding
+it.
 
-\textbf{What the reaction number contains.} Reaction latency is end-to-end
-(ground-truth change $\rightarrow$ first agent action) and therefore folds in one
-Gemini round-trip, not just detection. Decomposing the event-driven runs, the
-\emph{detection} component (change $\rightarrow$ the watcher waking) has a median
-of $2.1$\,s --- near the $1$\,Hz sampling bound --- while the model round-trip
-that follows adds a median of $5.4$\,s, for $7.5$\,s end-to-end. The model term
-is a fixed cost of consulting a language model and is shared across all arms, so
-it inflates the absolute numbers without biasing the comparison; the architecture
-controls only the $2.1$\,s detection term, which is where event-driven waiting
-wins.
+The reaction figure is end-to-end, from the ground-truth change to the first agent
+action, so it folds in one Gemini round-trip rather than detection alone.
+Decomposing the event-driven runs, the detection component (change to the watcher
+waking) has a median of $2.1$\,s, near the $1$\,Hz sampling bound, while the model
+round-trip that follows adds a median of $5.4$\,s, for $7.5$\,s end-to-end. That
+model term is a fixed cost of consulting a language model and is shared across all
+arms, so it inflates the absolute numbers without biasing the comparison. The
+architecture controls only the $2.1$\,s detection term.
 
-\textbf{The one miss.} Polling and \texttt{sleep} never fail; event-driven and
-free-choice succeed $97\%$ and $94\%$ of the time. The rare miss is the eager
-detector's failure mode --- a wake on incidental motion that the model acts on
-before the true event, or a below-threshold signal --- and is the price of the
-$O(1)$ cost, not a contradiction of it.
+Polling and \texttt{sleep} never fail; event-driven and free-choice succeed $97\%$
+and $94\%$ of the time. The rare miss is the eager detector's failure mode: a wake
+on incidental motion that the model acts on before the true event, or a
+below-threshold signal. It is the price of the $O(1)$ cost.
 
 \subsection{RQ2: change-threshold characterization}
 \label{sec:rq2}
@@ -534,8 +525,8 @@ $O(1)$ cost, not a contradiction of it.
 The threshold $\phi$ trades false wakes against missed changes. To locate that
 boundary we captured $1$\,Hz frame streams from three noise scenes and the signal
 transition, then replayed the production wake loop (Algorithm~\ref{alg:wait})
-offline at every $\phi$ --- counting false wakes on the noise and testing whether
-the real event still trips the detector. Fig.~\ref{fig:rq2} shows the result.
+offline at every $\phi$, counting false wakes on the noise and testing whether the
+real event still trips the detector. Fig.~\ref{fig:rq2} shows the result.
 
 \begin{figure}[t]
 \centering
@@ -555,15 +546,15 @@ passes each scene's measured amplitude ($0.2\times$, $1.4\times$, $16\times\phi_
 confirming that $\phi$ \emph{governs} the $O(1)\!\to\!O(rT)$ boundary of
 \S\ref{sec:cost} rather than merely bounding it: a scene is quiescent-in-effect
 precisely when its amplitude sits below $\phi$. Second, the signal changes
-$33.6\times\phi_0$ of the screen --- far above every noise scene --- so any $\phi$
-in the band $[\,1.4\times,\,33.6\times\,]\phi_0$ eliminates the clock's false
-wakes while still catching the event. The production $\phi_0$ sits at the eager
-end of the safe range: it admits some false wakes on the busier scenes (which the
-model filters, \S\ref{sec:waiting}) in exchange for never missing a signal, the
+$33.6\times\phi_0$ of the screen, far above every noise scene, so any $\phi$ in
+the band $[\,1.4\times,\,33.6\times\,]\phi_0$ eliminates the clock's false wakes
+while still catching the event. The production $\phi_0$ sits at the eager end of
+the safe range: it admits some false wakes on the busier scenes (which the model
+filters, \S\ref{sec:waiting}) in exchange for never missing a signal, the
 asymmetry we intended. Raising $\phi$ toward the signal amplitude would trade
-those false wakes for missed events on any scene whose real signal is smaller
-than the banner used here --- the reason we do not, and the reason a fixed scalar
-$\phi$ is a floor for future work rather than the final answer.
+those false wakes for missed events on any scene whose real signal is smaller than
+the banner used here, so we do not; a fixed scalar $\phi$ is a starting point,
+not the final answer.
 
 \subsection{RQ3: deployment observations}
 \label{sec:rq3}
@@ -599,12 +590,12 @@ Polling \texttt{wait} calls & 354 \\
 \end{tabular}
 \end{table}
 
-The load-bearing observation in Table~\ref{tab:deploy} is that \textbf{32\% of
-active agent time was spent waiting}. Waiting is not a corner case in deployment
-even though it is absent from benchmarks (\S\ref{sec:gap}).
+The main observation in Table~\ref{tab:deploy} is that $32\%$ of active agent time
+was spent waiting. Waiting is not a corner case in deployment even though it is
+absent from benchmarks (\S\ref{sec:gap}).
 
-We explicitly decline to interpret the 359-to-7 ratio of event-driven to fixed
-waits as evidence of a preference. The tool descriptions presented to the model
+We do not interpret the 359-to-7 ratio of event-driven to fixed waits as evidence
+of a preference. The tool descriptions presented to the model
 recommend \texttt{wait\_for\_screen\_change} over \texttt{sleep}; the ratio
 therefore measures instruction-following, not a discovered property. To separate
 the two we ran the free-choice arm of \S\ref{sec:rq1}, which exposes both
@@ -632,7 +623,7 @@ restarting the task.
 Across the deployment we observed 17 agent-initiated handoffs (logins, a captcha,
 a credential entry) and 203 operator guidance messages. We present these as
 design and qualitative observation only: there is no controlled baseline, and the
-203 guidance messages indicate a human was frequently in the loop --- these runs
+203 guidance messages indicate a human was frequently in the loop. These runs
 were supervised, not autonomous, and should not be read as evidence of unattended
 operation.
 
@@ -642,9 +633,8 @@ operation.
 
 \textbf{The degenerate case.} On a screen with continuous motion, event-driven
 waiting fires on every frame and performs \emph{worse} than polling, since each
-false wake is an unbounded-rate model call (\S\ref{sec:cost}). Our primitive is
-correct only for screens that are quiescent between meaningful events. We regard
-naming this regime as a precondition for claiming the other one.
+false wake is an unbounded-rate model call (\S\ref{sec:cost}). The primitive is
+correct only for screens that are quiescent between meaningful events.
 
 \textbf{Pixel-level detection is blind to off-screen change.} A download that
 completes without updating the display will not wake the agent; this is precisely
@@ -661,14 +651,13 @@ more.
 
 \textbf{Ethics.} The agent executes exclusively inside a Docker-isolated
 sandbox with no host filesystem access. The controlled experiments
-(\S\ref{sec:rq1},~\S\ref{sec:rq2}) are entirely synthetic --- scripted dialogs,
+(\S\ref{sec:rq1},~\S\ref{sec:rq2}) are entirely synthetic: scripted dialogs,
 clocks, and terminals with no accounts, no personal data, and no human subjects.
 The deployment logs behind \S\ref{sec:rq3}, however, arose from personal use and
 contain third-party conversation data from people who did not consent to
 appearing in a research artifact. We therefore report only aggregate counts from
-those logs --- never message content --- and \textbf{withhold the raw logs
-entirely}; the released artifact comprises the code and the synthetic task suite
-alone. The motivating example opening Section~\ref{sec:intro} is synthetic for
+those logs, never message content, and withhold the raw logs entirely; the
+released artifact comprises the code and the synthetic task suite alone. The motivating example opening Section~\ref{sec:intro} is synthetic for
 the same reason.
 
 % ===========================================================================
@@ -678,9 +667,10 @@ the same reason.
 Waiting is an action. Agent architectures that model only steps force waiting to
 be expressed as polling, and when the poller is a language model, polling makes
 the cost of doing nothing scale with the duration of doing nothing. Moving the
-waiting predicate server-side decouples model calls from wall-clock time --- on a
-quiescent screen, and with a false-wake term that grows as that assumption
-weakens. The trade-off is the contribution; the primitive is the easy part.
+waiting predicate server-side decouples model calls from wall-clock time on a
+quiescent screen, with a false-wake term that grows as that assumption weakens.
+Characterizing that trade-off, more than the primitive itself, is what this paper
+offers.
 
 % ===========================================================================
 
