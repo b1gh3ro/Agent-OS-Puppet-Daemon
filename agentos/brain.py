@@ -30,6 +30,13 @@ MODEL_CANDIDATES = [
 
 MAX_SCREENSHOTS_IN_HISTORY = 3
 
+#: Hard ceiling on a single model round-trip. Thinking + a 1280x800 screenshot
+#: runs ~20-30 s, so this is generous; it exists only to stop a stalled
+#: connection from hanging the loop forever.
+MODEL_CALL_TIMEOUT_MS = 180_000
+#: How many times a timed-out/transient model call is retried before giving up.
+MODEL_CALL_RETRIES = 2
+
 SYSTEM_HINT = (
     "You are operating a Linux desktop ({w}x{h}) inside a sandbox running the "
     "openbox window manager (no taskbar, no app launcher, no Ubuntu/GNOME "
@@ -493,6 +500,11 @@ class GeminiBrain:
             ],
             safety_settings=self._safety_settings(),
             system_instruction=system_instruction(instructions),
+            # Without this the SDK waits forever. A stalled connection then parks
+            # _loop inside _generate, and since cancel/pause are only honored in
+            # pause_gate at the top of the iteration, the whole task wedges with
+            # the dashboard buttons inert. Bound the call instead and retry.
+            http_options=types.HttpOptions(timeout=MODEL_CALL_TIMEOUT_MS),
         )
 
     @staticmethod
@@ -517,29 +529,57 @@ class GeminiBrain:
             "total_tokens": getattr(usage, "total_token_count", None) or 0,
         }
 
+    @staticmethod
+    def _is_transient(e: Exception) -> bool:
+        """Whether a failed model call is worth retrying on the same model."""
+        if isinstance(e, (asyncio.TimeoutError, TimeoutError, ConnectionError)):
+            return True
+        message = str(e).lower()
+        return any(hint in message for hint in (
+            "timeout", "timed out", "deadline", "unavailable", "503", "502", "504",
+            "connection", "reset by peer", "429", "resource_exhausted",
+        ))
+
     async def _generate(self, contents, log: RunLog | None = None, step: int = 0,
-                        instructions: str | None = None):
+                        instructions: str | None = None, task: Task | None = None,
+                        attempt: int = 0):
         """Call the model, falling back through MODEL_CANDIDATES once.
 
         Every model call in the system funnels through here, so this is where
         cost is measured: one `model_call` event per round-trip, carrying token
         counts and wall-clock latency. Model *calls* and latency are the metrics
-        that caching cannot deflate, so they are recorded alongside tokens."""
+        that caching cannot deflate, so they are recorded alongside tokens.
+
+        When `task` is given the wait is cancelable: this is the longest await in
+        the loop, and cancel/pause are otherwise only honored by pause_gate at
+        the top of the next iteration, so a slow or stalled call would leave the
+        dashboard buttons dead until it returned."""
         self._repair_safety_acks(contents)  # heal any unacknowledged safety confirmations first
         last_error: Exception | None = None
         for model in list(self._models):
             started = time.perf_counter()
             try:
-                response = await self.client.aio.models.generate_content(
+                call = self.client.aio.models.generate_content(
                     model=model, contents=contents,
                     config=self._config(instructions),
                 )
+                response = await (_await_cancelable(task, call) if task is not None else call)
+            except TaskCancelled:
+                raise
             except Exception as e:
                 last_error = e
                 message = str(e).lower()
-                if not any(hint in message for hint in ("not found", "not supported", "invalid model", "404")):
-                    raise
-                continue
+                if any(hint in message for hint in ("not found", "not supported", "invalid model", "404")):
+                    continue  # this model is unavailable — try the next candidate
+                # A timeout or transient transport failure is not a reason to
+                # kill a 600-step run: retry the same model a bounded number of
+                # times before letting the error propagate.
+                if attempt < MODEL_CALL_RETRIES and self._is_transient(e):
+                    log and log.event(step, "model_call_retry", model=model,
+                                      attempt=attempt + 1, error=str(e)[:200])
+                    return await self._generate(contents, log, step, instructions,
+                                                task, attempt=attempt + 1)
+                raise
             self._models = [model]
             if log is not None:
                 log.event(step, "model_call", model=model,
@@ -786,7 +826,7 @@ class GeminiBrain:
             self._drain_guidance(task, contents, log, step)
             task.steps_taken = step
 
-            response = await self._generate(contents, log, step, task.instructions)
+            response = await self._generate(contents, log, step, task.instructions, task)
             candidate = response.candidates[0] if response.candidates else None
             if candidate is None or candidate.content is None:
                 # A prompt-level SAFETY block (block_reason=SAFETY, no ratings)
