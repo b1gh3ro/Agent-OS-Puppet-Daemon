@@ -323,6 +323,30 @@ async def pause_gate(task: Task, log: RunLog, step: int) -> None:
     log.event(step, "resumed")
 
 
+async def _await_cancelable(task: Task, awaitable, *, poll: float = 0.25):
+    """Await a long-running operation while honoring cancel requests quickly."""
+    inner = asyncio.create_task(awaitable)
+    try:
+        while True:
+            if task.cancel_requested:
+                inner.cancel()
+                try:
+                    await inner
+                except (asyncio.CancelledError, Exception):
+                    pass
+                raise TaskCancelled()
+            done, _ = await asyncio.wait({inner}, timeout=poll)
+            if inner in done:
+                return inner.result()
+    finally:
+        if not inner.done():
+            inner.cancel()
+            try:
+                await inner
+            except (asyncio.CancelledError, Exception):
+                pass
+
+
 # An agent-initiated wait for a human (wait_for_user, or a safety-block pause)
 # self-resumes after this long, so the agent keeps trying on its own rather than
 # blocking forever when nobody is at the console. The manual Pause button is
@@ -657,7 +681,7 @@ class GeminiBrain:
                 if task.wake_requested:
                     log.event(step, "sleep_woken", after=round(elapsed, 1))
                     break
-                await asyncio.sleep(min(seconds - elapsed, 1.0))
+                await _await_cancelable(task, asyncio.sleep(min(seconds - elapsed, 1.0)))
                 elapsed += 1.0
         finally:
             GeminiBrain._close_wait(task)
@@ -707,7 +731,7 @@ class GeminiBrain:
                     woken = True
                     log.event(step, "wait_woken", after=round(elapsed, 1))
                     break
-                await asyncio.sleep(min(timeout - elapsed, 1.0))
+                await _await_cancelable(task, asyncio.sleep(min(timeout - elapsed, 1.0)))
                 elapsed += 1.0
                 if GeminiBrain._frames_differ(
                         baseline, GeminiBrain._signature(await sandbox.screenshot())):
@@ -830,7 +854,9 @@ class GeminiBrain:
                     continue
 
                 try:
-                    payload = await self._execute(fc.name, args, sandbox) or {}
+                    payload = await self._execute(fc.name, args, sandbox, task) or {}
+                except TaskCancelled:
+                    raise  # a cancel mid-action must abort, not become an error payload
                 except Exception as e:
                     payload = {"error": str(e)}
                     log.event(step, "action_error", name=fc.name, error=str(e))
@@ -912,7 +938,8 @@ class GeminiBrain:
                         fr.response = {**(fr.response or {}), "safety_acknowledgement": "true"}
         return False
 
-    async def _execute(self, name: str, args: dict, sandbox: Sandbox) -> dict | None:
+    async def _execute(self, name: str, args: dict, sandbox: Sandbox,
+                       task: Task) -> dict | None:
         """Dispatch a model action; a returned dict goes back to the model in
         the function response. Covers both the current gemini-3.5 action
         names (click, hotkey, wait, ...), the legacy computer-use-preview
@@ -927,16 +954,18 @@ class GeminiBrain:
 
         match name:
             case "run_command":
-                code, output = await sandbox.exec_shell(str(args.get("command", "")))
+                code, output = await _await_cancelable(
+                    task, sandbox.exec_shell(str(args.get("command", "")))
+                )
                 if len(output) > RUN_COMMAND_OUTPUT_LIMIT:
                     output = output[:RUN_COMMAND_OUTPUT_LIMIT] + "\n…(output truncated)"
                 return {"exit_code": code, "output": output}
             case "open_app":
                 await sandbox.launch(str(args.get("command", "")))
-                await asyncio.sleep(3)
+                await _await_cancelable(task, asyncio.sleep(3))
             case "open_web_browser":
                 await sandbox.launch("firefox-esr")
-                await asyncio.sleep(6)
+                await _await_cancelable(task, asyncio.sleep(6))
             case "click" | "click_at":
                 await sandbox.click(*point())
             case "double_click":
@@ -959,7 +988,7 @@ class GeminiBrain:
                     await sandbox.key("Return")
             case "type_text_at":
                 await sandbox.click(*point())
-                await asyncio.sleep(0.3)
+                await _await_cancelable(task, asyncio.sleep(0.3))
                 if args.get("clear_before_typing", True):
                     await sandbox.key("ctrl+a")
                 await sandbox.type_text(args.get("text", ""))
@@ -985,19 +1014,19 @@ class GeminiBrain:
             case "take_screenshot":
                 pass  # a fresh screenshot is returned after every action anyway
             case "wait" | "wait_5_seconds":
-                await asyncio.sleep(min(float(args.get("seconds", 5)), 15))
+                await _await_cancelable(task, asyncio.sleep(min(float(args.get("seconds", 5)), 15)))
             case "go_back":
                 await sandbox.key("alt+Left")
             case "go_forward":
                 await sandbox.key("alt+Right")
             case "navigate":
                 await sandbox.key("ctrl+l")
-                await asyncio.sleep(0.3)
+                await _await_cancelable(task, asyncio.sleep(0.3))
                 await sandbox.type_text(args.get("url", ""))
                 await sandbox.key("Return")
             case "search":
                 await sandbox.key("ctrl+l")
-                await asyncio.sleep(0.3)
+                await _await_cancelable(task, asyncio.sleep(0.3))
                 await sandbox.type_text("https://duckduckgo.com")
                 await sandbox.key("Return")
             case _:

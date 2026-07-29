@@ -48,7 +48,11 @@ class DockerSandbox:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await proc.communicate()
+        try:
+            stdout, stderr = await proc.communicate()
+        except asyncio.CancelledError:
+            proc.kill()
+            raise
         if check and proc.returncode != 0:
             cmd = " ".join(argv)
             raise SandboxError(f"sandbox command failed ({cmd}): {stderr.decode(errors='replace').strip()}")
@@ -119,6 +123,9 @@ class DockerSandbox:
         except TimeoutError:
             proc.kill()
             return 124, f"(command still running after {timeout:.0f}s and was killed; use open_app for GUI programs)"
+        except asyncio.CancelledError:
+            proc.kill()
+            raise
         return proc.returncode or 0, stdout.decode(errors="replace")
 
 
