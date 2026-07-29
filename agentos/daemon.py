@@ -32,6 +32,9 @@ log = logging.getLogger("agentos")
 
 _SCREENSHOT_NAME = re.compile(r"^step_\d{3,}\.png$")
 
+#: How long shutdown waits for cancelled workers to finish persisting a task.
+WORKER_SHUTDOWN_GRACE = 10.0
+
 
 class Daemon:
     def __init__(self, brain, sandbox: Sandbox, workers: int = 1,
@@ -527,6 +530,11 @@ class Daemon:
         async def stop_workers(app: web.Application):
             for w in app["workers"]:
                 w.cancel()
+            # Await them: the worker's `finally` is what writes history.json, so
+            # cancelling without waiting can drop a long task's conversation on
+            # Ctrl+C. Bounded, so a wedged worker can't hang shutdown either.
+            if app["workers"]:
+                await asyncio.wait(app["workers"], timeout=WORKER_SHUTDOWN_GRACE)
             if self._session and not self._session.closed:
                 await self._session.close()
 
