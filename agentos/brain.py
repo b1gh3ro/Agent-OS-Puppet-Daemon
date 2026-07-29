@@ -555,6 +555,9 @@ class GeminiBrain:
         the top of the next iteration, so a slow or stalled call would leave the
         dashboard buttons dead until it returned."""
         self._repair_safety_acks(contents)  # heal any unacknowledged safety confirmations first
+        invented = self._repair_dangling_calls(contents)  # …and any unanswered calls
+        if invented and log is not None:
+            log.event(step, "history_repaired", unanswered_calls=invented)
         last_error: Exception | None = None
         for model in list(self._models):
             started = time.perf_counter()
@@ -977,6 +980,68 @@ class GeminiBrain:
                     if fr and fr.name in need and "safety_acknowledgement" not in (fr.response or {}):
                         fr.response = {**(fr.response or {}), "safety_acknowledgement": "true"}
         return False
+
+    @staticmethod
+    def _repair_dangling_calls(contents: list[types.Content]) -> int:
+        """Give every function_call a matching function_response, in order.
+
+        A batch is only answered at the END of the step: the model turn with N
+        calls is appended first, the turn carrying their N responses last. Any
+        interruption in between — cancel, deadline, a crash mid-action — persists
+        a conversation whose final model turn has unanswered calls. `continue`
+        then appends its own text+screenshot turn after it, and Gemini rejects
+        every subsequent request with "Each Function Response must be matched to
+        a Function Call by name", so the continued task dies on step 1 and stays
+        dead however often it is retried.
+
+        Rebuild each response turn to mirror its calls positionally, keeping real
+        responses and synthesizing one per unanswered call. Returns the number of
+        responses invented, for logging."""
+        invented = 0
+        i = 0
+        while i < len(contents):
+            content = contents[i]
+            calls = [p.function_call for p in (content.parts or [])
+                     if p.function_call] if content.role == "model" else []
+            if not calls:
+                i += 1
+                continue
+
+            nxt = contents[i + 1] if i + 1 < len(contents) else None
+            existing = [p for p in (nxt.parts or []) if p.function_response] if nxt else []
+            if len(existing) == len(calls) and all(
+                    p.function_response.name == fc.name
+                    for p, fc in zip(existing, calls)):
+                i += 2 if nxt else 1
+                continue
+
+            # Reuse a real response per call (matching by name, consuming each
+            # only once so a batch repeating a tool still lines up), invent the
+            # rest.
+            pool = list(existing)
+            matched: list[types.Part] = []
+            for fc in calls:
+                hit = next((p for p in pool if p.function_response.name == fc.name), None)
+                if hit is not None:
+                    pool.remove(hit)
+                    matched.append(hit)
+                else:
+                    invented += 1
+                    matched.append(types.Part(function_response=types.FunctionResponse(
+                        name=fc.name, response={"error": (
+                            "interrupted — the run stopped before this action "
+                            "completed, so it may not have taken effect. Check the "
+                            "current screen before assuming anything about it.")})))
+
+            if nxt is not None and nxt.role == "user":
+                # Fold into the following user turn — whether it is the real
+                # response turn or (after a `continue`) the hint+screenshot turn.
+                # Responses lead it, exactly as the loop builds them.
+                nxt.parts = matched + [p for p in (nxt.parts or []) if not p.function_response]
+            else:
+                contents.insert(i + 1, types.Content(role="user", parts=matched))
+            i += 2
+        return invented
 
     async def _execute(self, name: str, args: dict, sandbox: Sandbox,
                        task: Task) -> dict | None:
