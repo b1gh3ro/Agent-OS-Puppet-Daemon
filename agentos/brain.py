@@ -37,6 +37,21 @@ MODEL_CALL_TIMEOUT_MS = 180_000
 #: How many times a timed-out/transient model call is retried before giving up.
 MODEL_CALL_RETRIES = 2
 
+#: Conversation size (estimated prompt tokens) that triggers elision, and the
+#: size elision cuts back to. _trim_screenshots caps images but nothing capped
+#: turns, so a long or continued run grew its prompt without limit — a 1828-turn
+#: history measured 157k tokens PER STEP. Trimming is hysteretic: it fires at the
+#: limit and cuts well past it, so it happens rarely rather than every step,
+#: which matters because each trim invalidates the implicitly cached prefix from
+#: the cut point on.
+HISTORY_TOKEN_LIMIT = 120_000
+HISTORY_TOKEN_TARGET = 60_000
+#: Rough cost of one screenshot in the prompt; only used for the estimate above.
+IMAGE_TOKEN_ESTIMATE = 800
+#: The raw byte/4 estimate runs low against what the API actually bills; this
+#: corrects it. Measured against the real 1828-turn history (see _estimate_tokens).
+TOKEN_ESTIMATE_FUDGE = 1.15
+
 SYSTEM_HINT = (
     "You are operating a Linux desktop ({w}x{h}) inside a sandbox running the "
     "openbox window manager (no taskbar, no app launcher, no Ubuntu/GNOME "
@@ -558,6 +573,12 @@ class GeminiBrain:
         invented = self._repair_dangling_calls(contents)  # …and any unanswered calls
         if invented and log is not None:
             log.event(step, "history_repaired", unanswered_calls=invented)
+        # Trim only after repairing: eliding a half-answered batch would leave a
+        # dangling call behind and 400 the request we are about to send.
+        dropped = self._trim_history(contents)
+        if dropped and log is not None:
+            log.event(step, "history_elided", turns=dropped,
+                      est_tokens=self._estimate_tokens(contents))
         last_error: Exception | None = None
         for model in list(self._models):
             started = time.perf_counter()
@@ -1149,6 +1170,101 @@ class GeminiBrain:
             image.save(buf, format="PNG")
             png = buf.getvalue()
         return png
+
+    @staticmethod
+    def _estimate_tokens(contents: list[types.Content]) -> int:
+        """Cheap local estimate of a conversation's prompt cost.
+
+        Deliberately not count_tokens: that is a network round-trip, and this
+        runs before every model call. It is also *wrong* for this purpose —
+        count_tokens reported 82k for the conversation that generate_content
+        actually billed at 157k. The gap is thought_signature: gemini-3.5
+        attaches one to every function call, they are required to keep the call
+        valid on replay, and on a long run they dominate. In the 1828-turn
+        history that triggered this work, 894 signatures came to 293 KB — about
+        half the prompt, and invisible to count_tokens. Counting them here is the
+        difference between eliding at the right time and never eliding at all."""
+        total = 0
+        for content in contents:
+            for part in content.parts or []:
+                if part.text:
+                    total += len(part.text) // 4 + 2
+                if part.inline_data and part.inline_data.data:
+                    total += IMAGE_TOKEN_ESTIMATE
+                signature = getattr(part, "thought_signature", None)
+                if signature:
+                    total += len(signature) // 4
+                if part.function_call:
+                    total += (len(str(part.function_call.args or {}))
+                              + len(part.function_call.name or "")) // 4 + 4
+                fr = part.function_response
+                if fr:
+                    total += len(str(fr.response or {})) // 4 + 4
+                    for rp in (fr.parts or []):
+                        if getattr(rp, "inline_data", None):
+                            total += IMAGE_TOKEN_ESTIMATE
+        return int(total * TOKEN_ESTIMATE_FUDGE)
+
+    @staticmethod
+    def _atomic_blocks(contents: list[types.Content]) -> list[tuple[int, int]]:
+        """Turn indices grouped so a call turn and its response turn never split.
+
+        Dropping half a pair would recreate exactly the dangling-call 400 that
+        _repair_dangling_calls exists to fix, so elision moves in these units."""
+        blocks: list[tuple[int, int]] = []
+        i = 0
+        while i < len(contents):
+            has_calls = (contents[i].role == "model"
+                         and any(p.function_call for p in (contents[i].parts or [])))
+            span = 2 if has_calls and i + 1 < len(contents) else 1
+            blocks.append((i, i + span))
+            i += span
+        return blocks
+
+    @classmethod
+    def _trim_history(cls, contents: list[types.Content]) -> int:
+        """Elide the middle of an over-long conversation. Returns turns dropped.
+
+        Keeps the opening turn — it carries the goal and the first screenshot, so
+        dropping it would lose the task itself — plus as much of the recent tail
+        as the budget allows, and leaves a marker in between so the model knows
+        its memory of the early steps is gone rather than silently inventing
+        continuity."""
+        if cls._estimate_tokens(contents) <= HISTORY_TOKEN_LIMIT:
+            return 0
+        blocks = cls._atomic_blocks(contents)
+        if len(blocks) < 4:  # nothing meaningful to drop
+            return 0
+
+        def size(block: tuple[int, int]) -> int:
+            return cls._estimate_tokens(contents[block[0]:block[1]])
+
+        anchor = blocks[0]
+        budget = HISTORY_TOKEN_TARGET - size(anchor)
+        kept: list[tuple[int, int]] = []
+        used = 0
+        for block in reversed(blocks[1:]):
+            cost = size(block)
+            if kept and used + cost > budget:
+                break
+            kept.append(block)
+            used += cost
+        kept.reverse()
+
+        dropped_blocks = len(blocks) - 1 - len(kept)
+        if dropped_blocks <= 0:
+            return 0
+        first_kept = kept[0][0] if kept else len(contents)
+        dropped_turns = first_kept - anchor[1]
+
+        marker = types.Content(role="user", parts=[types.Part(text=(
+            f"[{dropped_turns} earlier turns elided to stay inside the context "
+            "window. You no longer have those screenshots or results — do not "
+            "rely on remembering them. Re-read the current screen before acting, "
+            "and if you need something from that stretch, find it again.]"))])
+        tail = [c for block in kept for c in contents[block[0]:block[1]]]
+        contents[:] = list(contents[anchor[0]:anchor[1]]) + [marker] + tail
+        return dropped_turns
 
     @staticmethod
     def _trim_screenshots(contents: list[types.Content], keep: int = MAX_SCREENSHOTS_IN_HISTORY) -> None:
