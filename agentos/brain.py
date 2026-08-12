@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import io
 import os
+import re
 import time
 
 from google import genai
@@ -36,6 +37,14 @@ MAX_SCREENSHOTS_IN_HISTORY = 3
 MODEL_CALL_TIMEOUT_MS = 180_000
 #: How many times a timed-out/transient model call is retried before giving up.
 MODEL_CALL_RETRIES = 2
+#: Rate limits get their own, larger budget. A 429 means the per-minute quota is
+#: spent, and it clears on its own once the window rolls — so unlike a transient
+#: fault the right response is to wait, not to re-fire. Sharing the transient
+#: budget burned both attempts against a wall the request could not pass and
+#: killed the run; on the free tier that happened constantly.
+RATE_LIMIT_RETRIES = 6
+RATE_LIMIT_BACKOFF_S = 20.0
+RATE_LIMIT_BACKOFF_CAP_S = 90.0
 
 #: Conversation size (estimated prompt tokens) that triggers elision, and the
 #: size elision cuts back to. _trim_screenshots caps images but nothing capped
@@ -44,8 +53,12 @@ MODEL_CALL_RETRIES = 2
 #: limit and cuts well past it, so it happens rarely rather than every step,
 #: which matters because each trim invalidates the implicitly cached prefix from
 #: the cut point on.
-HISTORY_TOKEN_LIMIT = 120_000
-HISTORY_TOKEN_TARGET = 60_000
+#: The defaults are sized for the free tier, which allows 250k tokens/minute.
+#: This loop sustains ~6 calls/min, so the old 120k/60k pair (a measured 83k
+#: median prompt) breached that ceiling in 77% of minutes; 30k/15k holds it
+#: under in ~99%. Raise both via env on a paid key to buy back context depth.
+HISTORY_TOKEN_LIMIT = int(os.getenv("AGENT_HISTORY_TOKEN_LIMIT", "30000"))
+HISTORY_TOKEN_TARGET = int(os.getenv("AGENT_HISTORY_TOKEN_TARGET", "15000"))
 #: Rough cost of one screenshot in the prompt; only used for the estimate above.
 IMAGE_TOKEN_ESTIMATE = 800
 #: The raw byte/4 estimate runs low against what the API actually bills; this
@@ -552,8 +565,24 @@ class GeminiBrain:
         message = str(e).lower()
         return any(hint in message for hint in (
             "timeout", "timed out", "deadline", "unavailable", "503", "502", "504",
-            "connection", "reset by peer", "429", "resource_exhausted",
+            "connection", "reset by peer",
         ))
+
+    @staticmethod
+    def _is_rate_limit(e: Exception) -> bool:
+        """Whether a failed call was throttled — wait it out rather than re-fire."""
+        message = str(e).lower()
+        return any(hint in message for hint in (
+            "429", "resource_exhausted", "rate limit", "quota",
+        ))
+
+    @staticmethod
+    def _retry_after(e: Exception, fallback: float) -> float:
+        """Honor the server's own retryDelay when it sends one."""
+        match = re.search(r"retrydelay['\":\s]+(\d+(?:\.\d+)?)s", str(e), re.I)
+        if match:
+            return min(max(float(match.group(1)), 1.0), RATE_LIMIT_BACKOFF_CAP_S)
+        return fallback
 
     async def _generate(self, contents, log: RunLog | None = None, step: int = 0,
                         instructions: str | None = None, task: Task | None = None,
@@ -595,6 +624,21 @@ class GeminiBrain:
                 message = str(e).lower()
                 if any(hint in message for hint in ("not found", "not supported", "invalid model", "404")):
                     continue  # this model is unavailable — try the next candidate
+                # Throttled: the quota window clears by itself, so sleep it off
+                # and re-send the same request. Cancelable, because a free-tier
+                # backoff is long enough that the operator may give up on it.
+                if self._is_rate_limit(e) and attempt < RATE_LIMIT_RETRIES:
+                    delay = self._retry_after(
+                        e, min(RATE_LIMIT_BACKOFF_S * 2 ** attempt, RATE_LIMIT_BACKOFF_CAP_S))
+                    log and log.event(step, "rate_limited", model=model,
+                                      attempt=attempt + 1, sleep_s=round(delay, 1),
+                                      error=str(e)[:200])
+                    if task is not None:
+                        await _await_cancelable(task, asyncio.sleep(delay))
+                    else:
+                        await asyncio.sleep(delay)
+                    return await self._generate(contents, log, step, instructions,
+                                                task, attempt=attempt + 1)
                 # A timeout or transient transport failure is not a reason to
                 # kill a 600-step run: retry the same model a bounded number of
                 # times before letting the error propagate.
