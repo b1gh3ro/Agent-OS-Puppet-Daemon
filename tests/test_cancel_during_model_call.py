@@ -14,7 +14,8 @@ import types as pytypes
 
 import pytest
 
-from agentos.brain import GeminiBrain, MODEL_CALL_TIMEOUT_MS, _await_cancelable
+from agentos.brain import (GeminiBrain, MODEL_CALL_TIMEOUT_MS, _await_cancelable,
+                           _Pacer)
 from agentos.logs import RunLog
 from agentos.models import Task, TaskCancelled
 
@@ -92,6 +93,7 @@ def test_generate_is_interrupted_by_cancel(tmp_path):
         task = Task(goal="x")
         brain = GeminiBrain.__new__(GeminiBrain)  # bypass __init__ (wants an API key)
         brain._models = ["fake-model"]
+        brain._pacer = _Pacer(0)  # no throttle: these assert on timing
         brain._config = lambda instructions=None: None
         brain._repair_safety_acks = lambda contents: None
 
@@ -127,6 +129,7 @@ def test_generate_without_task_still_works(tmp_path):
     async def inner():
         brain = GeminiBrain.__new__(GeminiBrain)
         brain._models = ["fake-model"]
+        brain._pacer = _Pacer(0)  # no throttle: these assert on timing
         brain._config = lambda instructions=None: None
         brain._repair_safety_acks = lambda contents: None
         sentinel = pytypes.SimpleNamespace(candidates=[], usage_metadata=None)

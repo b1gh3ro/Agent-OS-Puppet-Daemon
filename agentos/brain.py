@@ -45,6 +45,13 @@ MODEL_CALL_RETRIES = 2
 RATE_LIMIT_RETRIES = 6
 RATE_LIMIT_BACKOFF_S = 20.0
 RATE_LIMIT_BACKOFF_CAP_S = 90.0
+#: Requests/minute to pace ourselves to. The free tier enforces 5 for
+#: GenerateRequestsPerMinutePerProjectPerModel (the published figure of 10 is
+#: not what the API actually applies), and this loop naturally wants 6-7 — so
+#: over half its minutes would trip the cap. Tripping it costs a server-mandated
+#: ~56 s wait, which is far more than the ~12 s of spacing that avoids it, so we
+#: pace proactively and treat the 429 path as a backstop. 0 disables pacing.
+MODEL_CALLS_PER_MINUTE = float(os.getenv("AGENT_MAX_RPM", "5"))
 
 #: Conversation size (estimated prompt tokens) that triggers elision, and the
 #: size elision cuts back to. _trim_screenshots caps images but nothing capped
@@ -358,6 +365,35 @@ async def pause_gate(task: Task, log: RunLog, step: int) -> None:
     log.event(step, "resumed")
 
 
+class _Pacer:
+    """Spaces model calls so a per-minute quota is never tripped.
+
+    Reserving the slot under a lock (rather than sleeping inside it) keeps
+    concurrent workers from all waking onto the same instant and firing a burst
+    that trips the very limit this exists to respect.
+    """
+
+    def __init__(self, rpm: float) -> None:
+        self._interval = 60.0 / rpm if rpm > 0 else 0.0
+        self._lock = asyncio.Lock()
+        self._next = 0.0
+
+    async def wait(self, task: Task | None = None) -> float:
+        """Block until this call's slot comes up; returns seconds waited."""
+        if self._interval <= 0:
+            return 0.0
+        async with self._lock:
+            now = time.monotonic()
+            delay = max(0.0, self._next - now)
+            self._next = max(now, self._next) + self._interval
+        if delay > 0:
+            if task is not None:
+                await _await_cancelable(task, asyncio.sleep(delay))
+            else:
+                await asyncio.sleep(delay)
+        return delay
+
+
 async def _await_cancelable(task: Task, awaitable, *, poll: float = 0.25):
     """Await a long-running operation while honoring cancel requests quickly."""
     inner = asyncio.create_task(awaitable)
@@ -462,6 +498,7 @@ class GeminiBrain:
                                                    (for studying free choice)
         """
         self.client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+        self._pacer = _Pacer(MODEL_CALLS_PER_MINUTE)
         self._models = [model] if model else list(MODEL_CANDIDATES)
         self._environment = self._pick_environment()
         if waiting_tools is not None:
@@ -608,6 +645,12 @@ class GeminiBrain:
         if dropped and log is not None:
             log.event(step, "history_elided", turns=dropped,
                       est_tokens=self._estimate_tokens(contents))
+        # Pace before the first attempt only: the 429 path below does its own,
+        # longer wait, and stacking the two would idle for no reason.
+        if attempt == 0:
+            paced = await self._pacer.wait(task)
+            if paced > 0.5 and log is not None:
+                log.event(step, "paced", sleep_s=round(paced, 1))
         last_error: Exception | None = None
         for model in list(self._models):
             started = time.perf_counter()
