@@ -8,17 +8,30 @@ Full architecture explanation: [DOCUMENTATION.md](DOCUMENTATION.md)
 
 - WSL2 (Ubuntu) with Docker Desktop connected to it (`docker ps` works inside Ubuntu)
 - Python 3.12+
-- A Gemini API key (free tier is fine): https://aistudio.google.com/apikey
+- An API key, either:
+  - **OpenRouter** (paid, one key for many models): https://openrouter.ai/keys — or
+  - **Gemini** (free tier works, and is the only way to get the purpose-trained
+    computer-use model): https://aistudio.google.com/apikey
 
 ## Make it work
 
 All commands run inside WSL, from this folder.
 
-**Step 1 — your API key.** Create a file named `.env` containing:
+**Step 1 — your API key.** Create a file named `.env` containing **one** of:
 
 ```
+OPENROUTER_API_KEY=paste-your-key-here
 GEMINI_API_KEY=paste-your-key-here
 ```
+
+If both are set, OpenRouter wins; force either with `--brain openrouter` /
+`--brain gemini`. Pick the model with `AGENT_MODEL` (default on OpenRouter:
+`google/gemini-3.7-flash`).
+
+> On OpenRouter the agent drives the desktop with hand-declared click/type
+> tools, because no computer-use model is available there. It works, but it is
+> a weaker operator than Gemini's `gemini-2.5-computer-use-preview`, which was
+> trained for exactly this. Expect more steps and more misplaced clicks.
 
 **Step 2 — build the virtual desktop** (one time, ~2 minutes):
 

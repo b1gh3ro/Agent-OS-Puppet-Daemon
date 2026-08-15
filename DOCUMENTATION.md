@@ -43,11 +43,26 @@ Safety rails bound the loop: a step budget, a wall-clock timeout, and a cancel e
 
 - **WSL2** (Ubuntu) with **Docker Desktop** using the WSL2 backend (`docker` works inside Ubuntu)
 - **Python 3.12+** on the WSL side
-- A **Gemini API key** (free tier works) in `.env`:
+- An **API key** in `.env` — either provider:
 
 ```
+OPENROUTER_API_KEY=your-key-here     # preferred when both are present
 GEMINI_API_KEY=your-key-here
 ```
+
+The two are not equivalent. Gemini exposes computer use as a *server-side
+built-in tool*: the model is purpose-trained to emit UI actions, and the SDK
+just switches it on. OpenRouter proxies models over the OpenAI chat-completions
+API, exposes no such built-in, and lists no computer-use model — so
+`agentos/openrouter.py` declares the same action vocabulary (`click_at`,
+`type_text_at`, …, on the same 0-1000 coordinate grid) as ordinary function
+tools and lets a general vision model drive them. Everything downstream of the
+model call — history repair, elision, retries, action dispatch — is shared.
+
+Choose explicitly with `--brain gemini|openrouter|stub|auto`, and pick the model
+with `AGENT_MODEL` (an OpenRouter id such as `anthropic/claude-sonnet-5` when
+running through OpenRouter). Request pacing (`AGENT_MAX_RPM`) defaults to 5/min
+on Gemini to respect the free tier's quota, and to unpaced on OpenRouter.
 
 One-time setup:
 

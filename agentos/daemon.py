@@ -22,7 +22,7 @@ from aiohttp import web
 from dotenv import load_dotenv
 from google.genai import types
 
-from .brain import GeminiBrain, StubBrain
+from .brain import GeminiBrain, OpenRouterBrain, StubBrain
 from .logs import RunLog
 from .models import Task, TaskCancelled, TaskStatus
 from .sandbox import DockerSandbox, Sandbox, ensure_container
@@ -537,6 +537,9 @@ class Daemon:
                 await asyncio.wait(app["workers"], timeout=WORKER_SHUTDOWN_GRACE)
             if self._session and not self._session.closed:
                 await self._session.close()
+            # The OpenRouter transport holds its own HTTP session.
+            if hasattr(self.brain, "aclose"):
+                await self.brain.aclose()
 
         app.on_startup.append(start_workers)
         app.on_cleanup.append(stop_workers)
@@ -544,11 +547,21 @@ class Daemon:
 
 
 def make_brain(kind: str):
+    """Pick a transport. `auto` prefers OpenRouter when its key is present:
+    that is the deliberate opt-in, since a project with both keys set has just
+    added the OpenRouter one."""
     stub_steps = int(os.getenv("AGENT_STUB_STEPS", "3"))
     if kind == "stub":
         return StubBrain(steps=stub_steps)
+    if kind == "openrouter" or (kind == "auto" and os.getenv("OPENROUTER_API_KEY")):
+        if not os.getenv("OPENROUTER_API_KEY"):
+            log.warning("OPENROUTER_API_KEY not set — falling back to stub brain")
+            return StubBrain(steps=stub_steps)
+        return OpenRouterBrain(model=os.getenv("AGENT_MODEL") or None,
+                               waiting_tools=OpenRouterBrain.WAITING_TOOLS)
     if not os.getenv("GEMINI_API_KEY"):
-        log.warning("GEMINI_API_KEY not set — falling back to stub brain")
+        log.warning("neither OPENROUTER_API_KEY nor GEMINI_API_KEY set — "
+                    "falling back to stub brain")
         return StubBrain(steps=stub_steps)
     # Expose BOTH waiting primitives with neutral, matched-length wording so the
     # model picks sleep vs wait_for_screen_change on the task's merits, not
@@ -568,7 +581,8 @@ async def main() -> None:
                         help="bind address; use 0.0.0.0 to reach it over Tailscale/LAN")
     parser.add_argument("--port", type=int, default=8420)
     parser.add_argument("--container", default="agent-sandbox")
-    parser.add_argument("--brain", choices=["auto", "stub"], default="auto")
+    parser.add_argument("--brain", choices=["auto", "stub", "gemini", "openrouter"],
+                        default="auto")
     parser.add_argument("--token", default=os.getenv("AGENT_TOKEN", ""),
                         help="shared secret required on every request (recommended when not on 127.0.0.1)")
     parser.add_argument("--no-container-autostart", action="store_true",

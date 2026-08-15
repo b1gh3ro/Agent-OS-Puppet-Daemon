@@ -4,6 +4,9 @@ GeminiBrain drives the Gemini computer-use tool: send goal + screenshot,
 receive one UI action, execute it in the sandbox, send back a fresh
 screenshot, repeat until the model answers in plain text. It depends only on
 the Sandbox protocol and the Task model — no Docker, no HTTP.
+
+OpenRouterBrain (bottom of this file) runs the identical loop against
+OpenRouter, which has no computer-use built-in; see agentos/openrouter.py.
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ from google import genai
 from google.genai import types
 from PIL import Image, ImageChops
 
+from . import openrouter
 from .instructions import system_instruction
 from .logs import RunLog
 from .models import Task, TaskCancelled
@@ -497,9 +501,9 @@ class GeminiBrain:
             waiting_tools=WAITING_TOOLS         -> both, neutrally described
                                                    (for studying free choice)
         """
-        self.client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+        self.client = self._make_client()
         self._pacer = _Pacer(MODEL_CALLS_PER_MINUTE)
-        self._models = [model] if model else list(MODEL_CANDIDATES)
+        self._models = [model] if model else list(self._default_models())
         self._environment = self._pick_environment()
         if waiting_tools is not None:
             unknown = set(waiting_tools) - set(self.WAITING_TOOLS)
@@ -514,6 +518,17 @@ class GeminiBrain:
             or t["name"] not in self.WAITING_TOOLS
             or t["name"] in waiting_tools
         ]
+
+    @staticmethod
+    def _make_client():
+        """The transport. Subclassed to point the same loop somewhere else —
+        see OpenRouterBrain."""
+        return genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+
+    @staticmethod
+    def _default_models() -> list[str]:
+        """Fallback chain when no explicit model is given; provider-specific."""
+        return MODEL_CANDIDATES
 
     def _waiting_hint(self) -> str:
         """The SYSTEM_HINT paragraphs describing the exposed waiting primitives."""
@@ -1371,3 +1386,52 @@ class GeminiBrain:
             else:
                 holder.inline_data = None
                 holder.text = "(earlier screenshot elided)"
+
+
+class OpenRouterBrain(GeminiBrain):
+    """The same ReAct loop, driven through OpenRouter instead of the Gemini API.
+
+    Only the transport changes. `agentos.openrouter` translates this class's
+    Content/Part conversation into OpenAI chat messages and the reply back
+    again, so history repair, elision, screenshot trimming, retries and the
+    whole action dispatch are inherited unchanged.
+
+    The one thing that cannot be inherited is the computer-use tool. On Gemini
+    it is a server-side built-in the model was trained against; OpenRouter
+    proxies the OpenAI chat API and lists no computer-use model at all, so the
+    UI vocabulary is declared explicitly (openrouter.UI_TOOLS) under the same
+    action names and the same 0-1000 coordinate grid. A general vision model
+    driving those tools is a weaker operator than the purpose-trained one —
+    expect more steps and more misplaced clicks.
+    """
+
+    def __init__(self, model: str | None = None,
+                 waiting_tools: tuple[str, ...] | None = None):
+        super().__init__(model=model, waiting_tools=waiting_tools)
+        # MODEL_CALLS_PER_MINUTE defaults to 5 because that is the Gemini free
+        # tier's quota. An OpenRouter key is paid and has no such per-minute
+        # cap, so pacing is off unless AGENT_MAX_RPM explicitly asks for it —
+        # otherwise every run would idle ~12 s per step for no reason.
+        self._pacer = _Pacer(float(os.getenv("AGENT_MAX_RPM", "0")))
+
+    @staticmethod
+    def _make_client():
+        return openrouter.OpenRouterClient()
+
+    @staticmethod
+    def _default_models() -> list[str]:
+        return openrouter.MODEL_CANDIDATES
+
+    @staticmethod
+    def _pick_environment():
+        return None  # no computer-use built-in, so nothing to configure
+
+    def _config(self, instructions: str | None = None) -> openrouter.Config:
+        return openrouter.Config(
+            system_instruction=system_instruction(instructions),
+            tools=openrouter.UI_TOOLS + self._tools,
+            timeout_ms=MODEL_CALL_TIMEOUT_MS,
+        )
+
+    async def aclose(self) -> None:
+        await self.client.aclose()
