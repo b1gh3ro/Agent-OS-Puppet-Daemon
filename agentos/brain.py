@@ -114,8 +114,8 @@ SYSTEM_HINT = (
     "Firefox ESR is installed and usually already open; if the screen looks "
     "empty, call open_app(command='firefox-esr') instead of hunting for a "
     "launcher. You have a budget of {max_steps} actions for this task; each "
-    "action result tells you how many remain — make sure you deliver your "
-    "final answer before it runs out.\n"
+    "action result tells you how many remain — make sure you call finish() "
+    "before it runs out.\n"
     "You can also issue SEVERAL actions in a single turn when they follow "
     "predictably and none depends on seeing the result of the one before — e.g. "
     "click a field, type text, then press Enter; or fire off several "
@@ -125,7 +125,11 @@ SYSTEM_HINT = (
     "deciding the next move (a click that opens an unpredictable dialog, a "
     "search whose results you must read).\n"
     "{waiting}"
-    "Complete this task, then answer in plain text with the outcome:\n\n{goal}"
+    "Complete this task IN FULL, then call finish(summary=...) to report the "
+    "outcome. Do not stop early, and never send a plain-text status update "
+    "in place of doing the work: if the goal spans many items, keep going "
+    "until every one of them is done. Text with no tool call does not end "
+    "the task — you will simply be told to continue.\n\n{goal}"
 )
 
 # Waiting-primitive blurbs for SYSTEM_HINT, in two registers.
@@ -192,11 +196,35 @@ _NEUTRAL_TOOL_DESCRIPTION = {
 CONTINUE_HINT = (
     "The operator has a follow-up for you in this same session. The desktop "
     "is as you left it; a fresh screenshot is attached. You have a new budget "
-    "of {max_steps} actions. Complete the follow-up, then answer in plain "
-    "text with the outcome:\n\n{goal}"
+    "of {max_steps} actions. Complete the follow-up IN FULL, then call "
+    "finish(summary=...) to report the outcome. Text with no tool call does "
+    "not end the task — you will be told to continue:\n\n{goal}"
 )
 
 _CUSTOM_TOOLS = [
+    {
+        "name": "finish",
+        "description": (
+            "End the task and report the outcome. This is the ONLY way to end a "
+            "task: plain text with no tool call is read as a progress note, and "
+            "you will be told to keep working. Call it only once EVERY part of "
+            "the goal is actually done — if the goal covers a list of items, "
+            "that means all of them, not the ones you have got to so far. "
+            "Writing a status summary is not finishing. If anything is still "
+            "outstanding, do not call this; take the next action instead."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string", "description":
+                    "The outcome in plain text: what you accomplished."},
+                "remaining_work": {"type": "string", "description":
+                    "Anything the task asked for that you did NOT complete, and why. "
+                    "Leave empty only if truly nothing remains."},
+            },
+            "required": ["summary"],
+        },
+    },
     {
         "name": "run_command",
         "description": (
@@ -327,6 +355,12 @@ RUN_COMMAND_OUTPUT_LIMIT = 4000
 # After this many *consecutive* blocked/empty responses, stop silently
 # retrying and hand control to the operator instead of spinning.
 BLOCK_PAUSE_THRESHOLD = 4
+
+# How many consecutive text-only turns to push back on before accepting one
+# as the end of the task. A text turn is a progress note, not a completion
+# (only finish() ends a task), but a model that will not call finish() must
+# not spin the remaining budget writing summaries either.
+TEXT_ONLY_LIMIT = int(os.getenv("AGENT_TEXT_ONLY_LIMIT", "3"))
 
 # Model key names -> xdotool keysym names (pass-through when unmapped).
 _KEYMAP = {
@@ -947,6 +981,7 @@ class GeminiBrain:
     async def _loop(self, task: Task, sandbox: Sandbox, log: RunLog,
                     contents: list[types.Content]) -> str:
         blocked_streak = 0
+        text_only_streak = 0
         for step in range(1, task.max_steps + 1):
             await pause_gate(task, log, step)
             self._drain_guidance(task, contents, log, step)
@@ -984,9 +1019,28 @@ class GeminiBrain:
 
             calls = [p.function_call for p in (candidate.content.parts or []) if p.function_call]
             if not calls:
+                # A text-only turn is NOT a completion signal. On a long job the
+                # model narrates ("8 of 48 done, here is the queue") and treating
+                # the first such turn as the final answer ended runs with most of
+                # the work outstanding — 35 of 44 historical `done` runs stopped
+                # this way, only 9 on an exhausted budget. Push back and keep
+                # going; only finish() ends a task.
                 text = "".join(p.text or "" for p in (candidate.content.parts or [])).strip()
-                log.event(step, "done", result=text)
-                return text or "(model finished without a text answer)"
+                text_only_streak += 1
+                log.event(step, "text_only", streak=text_only_streak, text=text[:2000])
+                if text_only_streak >= TEXT_ONLY_LIMIT:
+                    # It will not call finish(); stop burning budget on summaries.
+                    log.event(step, "done", result=text, reason="text_only_limit")
+                    return text or "(model finished without a text answer)"
+                contents.append(types.Content(role="user", parts=[types.Part(text=(
+                    "That was a status update, not a completion, and it does not "
+                    "end the task — the run is still going. Check the goal: if ANY "
+                    "part of it is still outstanding, take the next action on it "
+                    "right now. Only call finish(summary=...) once every part is "
+                    "genuinely done."
+                ))]))
+                continue
+            text_only_streak = 0
 
             # The model may batch several actions in one turn (see SYSTEM_HINT).
             # Run them in order, but capture just ONE screenshot for the whole
@@ -1002,6 +1056,20 @@ class GeminiBrain:
                 # function_call that carried a safety_decision isn't acknowledged
                 # in its function_response, which otherwise wedges the whole task.
                 acknowledged = self._auto_acknowledge_safety(args, log, step)
+
+                if fc.name == "finish":
+                    summary = str(args.get("summary") or "").strip()
+                    remaining = str(args.get("remaining_work") or "").strip()
+                    payload = {"acknowledged": True}
+                    if acknowledged:
+                        payload["safety_acknowledgement"] = "true"
+                    response_parts.append(types.Part(function_response=types.FunctionResponse(
+                        name=fc.name, response=payload)))
+                    contents.append(types.Content(role="user", parts=response_parts))
+                    log.event(step, "done", result=summary, remaining_work=remaining)
+                    if remaining:
+                        summary = f"{summary}\n\nReported as still outstanding: {remaining}"
+                    return summary or "(finish called without a summary)"
 
                 if fc.name in ("wait_for_user", "sleep", "wait_for_screen_change"):
                     # Block here (until Resume, a timer, or a screen change); the
@@ -1052,7 +1120,7 @@ class GeminiBrain:
             remaining = task.max_steps - step
             response_parts.append(types.Part(text=(
                 f"[budget: {remaining} of {task.max_steps} actions remaining"
-                + (" — give your final answer now]" if remaining <= 3 else "]")
+                + (" — call finish() now]" if remaining <= 3 else "]")
             )))
             contents.append(types.Content(role="user", parts=response_parts))
             self._trim_screenshots(contents)
