@@ -221,6 +221,11 @@ _CUSTOM_TOOLS = [
                 "remaining_work": {"type": "string", "description":
                     "Anything the task asked for that you did NOT complete, and why. "
                     "Leave empty only if truly nothing remains."},
+                "checked": {"type": "string", "description":
+                    "How you verified the WHOLE task is done — counts, not vibes. "
+                    "For a list of items: how many the task asked for, how many you "
+                    "completed, and how you confirmed it (e.g. re-read the tracking "
+                    "file). 'The recent steps looked finished' is not verification."},
             },
             "required": ["summary"],
         },
@@ -628,7 +633,8 @@ class GeminiBrain:
             for name in names if hasattr(types.HarmCategory, name)
         ]
 
-    def _config(self, instructions: str | None = None) -> types.GenerateContentConfig:
+    def _config(self, instructions: str | None = None,
+                goal: str | None = None) -> types.GenerateContentConfig:
         # The job's standing instructions ride in system_instruction (re-sent
         # every round-trip, kept out of the scrolling conversation) so the model
         # never forgets them however long the task runs. The loop passes the
@@ -643,7 +649,7 @@ class GeminiBrain:
                 types.Tool(function_declarations=self._tools),
             ],
             safety_settings=self._safety_settings(),
-            system_instruction=system_instruction(instructions),
+            system_instruction=system_instruction(instructions, goal),
             # Without this the SDK waits forever. A stalled connection then parks
             # _loop inside _generate, and since cancel/pause are only honored in
             # pause_gate at the top of the iteration, the whole task wedges with
@@ -702,7 +708,7 @@ class GeminiBrain:
 
     async def _generate(self, contents, log: RunLog | None = None, step: int = 0,
                         instructions: str | None = None, task: Task | None = None,
-                        attempt: int = 0):
+                        attempt: int = 0, goal: str | None = None):
         """Call the model, falling back through MODEL_CANDIDATES once.
 
         Every model call in the system funnels through here, so this is where
@@ -736,7 +742,7 @@ class GeminiBrain:
             try:
                 call = self.client.aio.models.generate_content(
                     model=model, contents=contents,
-                    config=self._config(instructions),
+                    config=self._config(instructions, goal),
                 )
                 response = await (_await_cancelable(task, call) if task is not None else call)
             except TaskCancelled:
@@ -760,7 +766,7 @@ class GeminiBrain:
                     else:
                         await asyncio.sleep(delay)
                     return await self._generate(contents, log, step, instructions,
-                                                task, attempt=attempt + 1)
+                                                task, attempt=attempt + 1, goal=goal)
                 # A timeout or transient transport failure is not a reason to
                 # kill a 600-step run: retry the same model a bounded number of
                 # times before letting the error propagate.
@@ -768,7 +774,7 @@ class GeminiBrain:
                     log and log.event(step, "model_call_retry", model=model,
                                       attempt=attempt + 1, error=str(e)[:200])
                     return await self._generate(contents, log, step, instructions,
-                                                task, attempt=attempt + 1)
+                                                task, attempt=attempt + 1, goal=goal)
                 raise
             self._models = [model]
             if log is not None:
@@ -1039,12 +1045,14 @@ class GeminiBrain:
                     contents: list[types.Content]) -> str:
         blocked_streak = 0
         text_only_streak = 0
+        finish_challenged = False
         for step in range(1, task.max_steps + 1):
             await pause_gate(task, log, step)
             self._drain_guidance(task, contents, log, step)
             task.steps_taken = step
 
-            response = await self._generate(contents, log, step, task.instructions, task)
+            response = await self._generate(contents, log, step, task.instructions,
+                                            task, goal=task.goal)
             candidate = response.candidates[0] if response.candidates else None
             if candidate is None or candidate.content is None:
                 # A prompt-level SAFETY block (block_reason=SAFETY, no ratings)
@@ -1082,6 +1090,10 @@ class GeminiBrain:
             contents.append(candidate.content)
 
             calls = [p.function_call for p in (candidate.content.parts or []) if p.function_call]
+            # Any real action means the model went back to work, so the next
+            # attempt to finish is challenged afresh rather than waved through.
+            if calls and not all(c.name == "finish" for c in calls):
+                finish_challenged = False
             if speech and calls:
                 # Narration that rides along with tool calls: the model's plan in
                 # its own words. Only a call-less turn is a completion candidate,
@@ -1117,6 +1129,7 @@ class GeminiBrain:
             # N screenshots per turn would undo the point of batching.
             response_parts: list[types.Part] = []
             need_screenshot = False
+            challenge: types.Content | None = None
             for fc in calls:
                 args = dict(fc.args or {})
                 log.event(step, "action", name=fc.name, args=args)
@@ -1129,6 +1142,38 @@ class GeminiBrain:
                 if fc.name == "finish":
                     summary = str(args.get("summary") or "").strip()
                     remaining = str(args.get("remaining_work") or "").strip()
+                    # First finish after doing real work is challenged, not
+                    # honoured. A model that has lost the scope (the queue
+                    # scrolled out of history) reports the recent tail as the
+                    # whole job and means it — pushing back on a text turn does
+                    # nothing, because this IS a tool call. So re-present the
+                    # goal verbatim and make it answer against the full list.
+                    # Calling finish twice with no action in between ends the
+                    # task, which keeps this bounded.
+                    if not finish_challenged:
+                        finish_challenged = True
+                        log.event(step, "finish_challenged", summary=summary,
+                                  checked=str(args.get("checked") or "").strip())
+                        response_parts.append(types.Part(function_response=types.FunctionResponse(
+                            name=fc.name, response={"accepted": False, "reason": (
+                                "Not yet — check against the full task first.")})))
+                        challenge = types.Content(role="user", parts=[types.Part(text=(
+                            "Before that finish is accepted: re-read the task in "
+                            "your system instructions. It is the authoritative "
+                            "scope and it has NOT been trimmed, whatever the "
+                            "conversation above still shows.\n\n"
+                            "Go through it item by item and count. If it names a "
+                            "list, how many items does it name, and how many have "
+                            "you actually completed and verified? Do not answer "
+                            "from memory of this conversation — earlier turns may "
+                            "have been elided. Check the real state: the tracking "
+                            "file, the page, the actual artifacts.\n\n"
+                            "If ANY item is outstanding, do not finish — start on "
+                            "the next one now. Only if every single one is "
+                            "genuinely done, call finish again with the counts in "
+                            "'checked'."
+                        ))])
+                        break
                     payload = {"acknowledged": True}
                     if acknowledged:
                         payload["safety_acknowledgement"] = "true"
@@ -1178,6 +1223,16 @@ class GeminiBrain:
                 response_parts.append(types.Part(
                     function_response=types.FunctionResponse(name=fc.name, response=payload)))
 
+            if challenge is not None:
+                # No screenshot and no budget footer: nothing was done to look
+                # at, and the next turn should be about scope, not spend. Any
+                # call batched after the finish never ran and so has no
+                # response — _repair_dangling_calls patches that before the
+                # next request, which is exactly what it is for.
+                contents.append(types.Content(role="user", parts=response_parts))
+                contents.append(challenge)
+                continue
+
             # One settle + one screenshot for the batch, hung off the last
             # response so the model sees the final state after every action ran.
             if need_screenshot:
@@ -1201,7 +1256,8 @@ class GeminiBrain:
             "Based on everything you have seen so far, give your best final answer "
             "to the task in plain text now."
         ))]))
-        response = await self._generate(contents, log, task.max_steps, task.instructions)
+        response = await self._generate(contents, log, task.max_steps,
+                                        task.instructions, goal=task.goal)
         candidates = response.candidates or []
         parts = (candidates[0].content.parts if candidates and candidates[0].content else None) or []
         text = "".join(p.text or "" for p in parts if p.text).strip()
@@ -1563,9 +1619,10 @@ class OpenRouterBrain(GeminiBrain):
     def _pick_environment():
         return None  # no computer-use built-in, so nothing to configure
 
-    def _config(self, instructions: str | None = None) -> openrouter.Config:
+    def _config(self, instructions: str | None = None,
+                goal: str | None = None) -> openrouter.Config:
         return openrouter.Config(
-            system_instruction=system_instruction(instructions),
+            system_instruction=system_instruction(instructions, goal),
             tools=openrouter.UI_TOOLS + self._tools,
             timeout_ms=MODEL_CALL_TIMEOUT_MS,
             reasoning=_reasoning_request(REASONING_EFFORT),

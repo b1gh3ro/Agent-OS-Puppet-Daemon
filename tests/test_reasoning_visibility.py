@@ -145,9 +145,9 @@ def test_thinking_and_narration_are_logged(tmp_path):
         types.Part(function_call=types.FunctionCall(name="run_command",
                                                     args={"command": "true"})),
     ])
-    brain = _brain([turn, types.Content(role="model", parts=[
-        types.Part(function_call=types.FunctionCall(
-            name="finish", args={"summary": "ok"}))])])
+    fin = types.Content(role="model", parts=[types.Part(
+        function_call=types.FunctionCall(name="finish", args={"summary": "ok"}))])
+    brain = _brain([turn, fin, fin])
 
     asyncio.run(brain._loop(task, _Sandbox(), log, []))
 
@@ -161,15 +161,18 @@ def test_unsigned_thought_parts_leave_the_conversation(tmp_path):
     task = Task(goal="x", max_steps=5)
     log = RunLog(task.id, root=tmp_path)
     contents: list[types.Content] = []
-    brain = _brain([types.Content(role="model", parts=[
+    fin = types.Content(role="model", parts=[
         _thought("a" * 5000),
         types.Part(function_call=types.FunctionCall(name="finish",
-                                                    args={"summary": "ok"}))])])
+                                                    args={"summary": "ok"}))])
+    brain = _brain([fin, fin])
 
     asyncio.run(brain._loop(task, _Sandbox(), log, contents))
 
     assert not any(p.thought for c in contents for p in (c.parts or []))
-    assert GeminiBrain._estimate_tokens(contents) < 200
+    # The 5000-char thought alone would be ~1400 tokens; what is left is the
+    # finish exchange and the challenge turn.
+    assert GeminiBrain._estimate_tokens(contents) < 600
 
 
 def test_signed_thought_parts_are_preserved():
@@ -186,10 +189,11 @@ def test_reasoning_is_not_mistaken_for_a_final_answer(tmp_path):
     """A turn that is pure reasoning has said nothing — it must not end the task."""
     task = Task(goal="x", max_steps=5)
     log = RunLog(task.id, root=tmp_path)
+    fin = types.Content(role="model", parts=[types.Part(function_call=types.FunctionCall(
+        name="finish", args={"summary": "real answer"}))])
     brain = _brain([
         types.Content(role="model", parts=[_thought("hmm, let me think")]),
-        types.Content(role="model", parts=[types.Part(function_call=types.FunctionCall(
-            name="finish", args={"summary": "real answer"}))]),
+        fin, fin,
     ])
 
     result = asyncio.run(brain._loop(task, _Sandbox(), log, []))

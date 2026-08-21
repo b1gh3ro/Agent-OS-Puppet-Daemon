@@ -20,10 +20,30 @@ PREAMBLE = (
     "The operator may update them mid-run; always follow the latest version:\n\n"
 )
 
+# The goal rides here too, for the same reason the instructions do. It is also
+# in the conversation, but the conversation is finite: `_trim_history` elides
+# the middle of a long run, and on a *continued* task the anchor turn it
+# protects belongs to the FIRST run, not to the follow-up goal the operator
+# typed afterwards. A 48-item queue given as a follow-up therefore scrolled out
+# of the model's view entirely, after which it saw a tidy recent tail, judged
+# the job complete, and finished with 40 items untouched. Re-sending the goal
+# every round-trip makes the scope impossible to forget or trim.
+GOAL_PREAMBLE = (
+    "THE TASK YOU ARE WORKING ON, in full. This is the authoritative scope — "
+    "the conversation gets trimmed on a long run, this does not. Before you "
+    "even consider finishing, re-read it and check every part is done:\n\n"
+)
 
-def system_instruction(text: str | None) -> str | None:
-    """The job's instructions wrapped in PREAMBLE, ready to hand to the model as
-    ``system_instruction`` — or None when the job has none, so callers can omit
+
+def system_instruction(text: str | None, goal: str | None = None) -> str | None:
+    """The job's goal and standing instructions, ready to hand to the model as
+    ``system_instruction`` — or None when it would be empty, so callers can omit
     the field entirely rather than send an empty system turn."""
+    blocks = []
+    goal = (goal or "").strip()
+    if goal:
+        blocks.append(GOAL_PREAMBLE + goal)
     text = (text or "").strip()
-    return PREAMBLE + text if text else None
+    if text:
+        blocks.append(PREAMBLE + text)
+    return "\n\n---\n\n".join(blocks) if blocks else None
