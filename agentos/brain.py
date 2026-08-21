@@ -362,6 +362,36 @@ BLOCK_PAUSE_THRESHOLD = 4
 # not spin the remaining budget writing summaries either.
 TEXT_ONLY_LIMIT = int(os.getenv("AGENT_TEXT_ONLY_LIMIT", "3"))
 
+#: OpenRouter's reasoning-budget dial, off by default. This does NOT gate whether
+#: the operator sees the model's thinking — it only buys more of it.
+#:
+#: Measured against google/gemini-3.7-flash on 2026-08-21, 3 runs per setting:
+#: with no `reasoning` field sent at all the model still reasons (944 tokens over
+#: 7 calls) and readable `reasoning.text` came back on 29% of turns; at "high" it
+#: rose to 45% of turns for 2.3x the reasoning tokens. The rest of every turn's
+#: thinking arrives as an opaque `reasoning.encrypted` blob whatever you pay, so
+#: raising this buys a partial view at a real cost — which is why per-action
+#: `intent` (present on 100% of UI actions, ~10 tokens) is the feed's backbone
+#: and this is the optional extra. OpenRouter transport only: the Gemini
+#: computer-use built-in does not accept a thinking_config alongside it.
+REASONING_EFFORT = os.getenv("AGENT_REASONING", "off").strip().lower()
+
+#: Cap on how much of one turn's reasoning goes into the run log. The feed is an
+#: evidence trail read by a human, not a second copy of the conversation.
+REASONING_LOG_LIMIT = int(os.getenv("AGENT_REASONING_LOG_LIMIT", "4000"))
+
+
+def _reasoning_request(effort: str) -> dict | None:
+    """OpenRouter's `reasoning` field for the configured effort, or None."""
+    if effort in ("", "off", "none", "0", "false"):
+        return None
+    if effort in ("low", "medium", "high"):
+        return {"effort": effort}
+    if effort.isdigit():           # a raw token budget, e.g. AGENT_REASONING=2048
+        return {"max_tokens": int(effort)}
+    raise ValueError(f"AGENT_REASONING must be off/low/medium/high or a token "
+                     f"count, got {effort!r}")
+
 # Model key names -> xdotool keysym names (pass-through when unmapped).
 _KEYMAP = {
     "enter": "Return", "return": "Return", "esc": "Escape", "escape": "Escape",
@@ -748,6 +778,33 @@ class GeminiBrain:
             return response
         raise last_error  # type: ignore[misc]
 
+    @staticmethod
+    def _split_thoughts(content: types.Content) -> tuple[str, str]:
+        """(reasoning, speech) for one model turn.
+
+        A part flagged `thought` is the model's private reasoning; the rest is
+        what it actually says. They were previously merged, so the reasoning was
+        either invisible or mistaken for a final answer."""
+        thinking, speech = [], []
+        for part in content.parts or []:
+            if part.text:
+                (thinking if part.thought else speech).append(part.text)
+        return "".join(thinking).strip(), "".join(speech).strip()
+
+    @staticmethod
+    def _strip_reasoning(content: types.Content) -> None:
+        """Drop display-only reasoning before the turn joins the conversation.
+
+        A Gemini-native thought part carries a thought_signature and MUST be
+        replayed verbatim to keep its function call valid. One synthesized from
+        an OpenRouter `reasoning` field has no signature, is never sent back
+        (see openrouter._to_messages), and would only inflate the local token
+        estimate and every trim decision made from it."""
+        parts = content.parts or []
+        keep = [p for p in parts if not (p.thought and not p.thought_signature)]
+        if len(keep) != len(parts):
+            content.parts = keep
+
     _TEXT_ONLY_ACTIONS = {"run_command"}
 
     @classmethod
@@ -1015,9 +1072,21 @@ class GeminiBrain:
                                                    step, blocked_streak)
                 continue
             blocked_streak = 0
+            # Surface the model's own account of what it is doing BEFORE the
+            # actions land in the feed, so the log reads as reasoning-then-move
+            # rather than a bare list of clicks.
+            thinking, speech = self._split_thoughts(candidate.content)
+            if thinking:
+                log.event(step, "thinking", text=thinking[:REASONING_LOG_LIMIT])
+            self._strip_reasoning(candidate.content)
             contents.append(candidate.content)
 
             calls = [p.function_call for p in (candidate.content.parts or []) if p.function_call]
+            if speech and calls:
+                # Narration that rides along with tool calls: the model's plan in
+                # its own words. Only a call-less turn is a completion candidate,
+                # so this text is commentary and was being dropped on the floor.
+                log.event(step, "narration", text=speech[:REASONING_LOG_LIMIT])
             if not calls:
                 # A text-only turn is NOT a completion signal. On a long job the
                 # model narrates ("8 of 48 done, here is the queue") and treating
@@ -1025,7 +1094,7 @@ class GeminiBrain:
                 # the work outstanding — 35 of 44 historical `done` runs stopped
                 # this way, only 9 on an exhausted budget. Push back and keep
                 # going; only finish() ends a task.
-                text = "".join(p.text or "" for p in (candidate.content.parts or [])).strip()
+                text = speech
                 text_only_streak += 1
                 log.event(step, "text_only", streak=text_only_streak, text=text[:2000])
                 if text_only_streak >= TEXT_ONLY_LIMIT:
@@ -1499,6 +1568,7 @@ class OpenRouterBrain(GeminiBrain):
             system_instruction=system_instruction(instructions),
             tools=openrouter.UI_TOOLS + self._tools,
             timeout_ms=MODEL_CALL_TIMEOUT_MS,
+            reasoning=_reasoning_request(REASONING_EFFORT),
         )
 
     async def aclose(self) -> None:

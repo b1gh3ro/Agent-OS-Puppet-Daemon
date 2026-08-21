@@ -63,6 +63,8 @@ Choose explicitly with `--brain gemini|openrouter|stub|auto`, and pick the model
 with `AGENT_MODEL` (an OpenRouter id such as `anthropic/claude-sonnet-5` when
 running through OpenRouter). Request pacing (`AGENT_MAX_RPM`) defaults to 5/min
 on Gemini to respect the free tier's quota, and to unpaced on OpenRouter.
+`AGENT_REASONING` (default `off`) buys extra visible reasoning on OpenRouter —
+see *Seeing why, not just what*.
 
 One-time setup:
 
@@ -326,6 +328,29 @@ This exists because of a real failure: Firefox died in a long-lived container, a
 **Screenshots are on-demand, not streamed.** `_settled_screenshot()` sleeps ~1 s after each action (letting the UI settle), captures, and downscales anything wider than 1366 px with Pillow. The original brief called for a 1 Hz screenshot stream to the model; that would burn tokens on frames where nothing changed. One screenshot per decision is all a ReAct loop needs.
 
 **History trimming.** Each screenshot is ~200 KB. Forty steps of history would blow past request limits, so `_trim_screenshots()` blanks the image bytes out of all but the last 3 function responses, leaving `{"screenshot": "elided"}` markers. The model keeps its full *action* history but only recent *vision* — enough to stay oriented.
+
+**Seeing why, not just what.** A feed of `click_at {"x":440,"y":312}` tells an
+operator nothing, so every UI tool takes a required one-line `intent` and the
+activity feed renders it after the action name. That is the dependable channel:
+present on 100% of UI actions for ~10 tokens each.
+
+The model's actual chain of thought is a bonus on top. On the OpenRouter
+transport `message.reasoning` is parsed into a Part flagged `thought=True`,
+logged as a `thinking` event, and then **stripped before the turn re-enters the
+conversation** — this API wants reasoning echoed back as `reasoning_details`,
+not as assistant content, and keeping it would inflate both the prompt and the
+local token estimate that drives trimming. (A Gemini-native thought part is
+recognised by its `thought_signature` and is preserved, because its function
+call is invalid on replay without it.) Text the model writes *alongside* its
+tool calls is logged separately as `narration`; it used to be discarded.
+
+Reasoning is only partly visible whatever you do. Measured against
+`google/gemini-3.7-flash` (2026-08-21, 3 runs per setting): with no `reasoning`
+field sent the model still reasons and readable text came back on 29% of turns;
+`AGENT_REASONING=high` raised that to 45% for 2.3x the reasoning tokens. The
+remainder arrives as an opaque `reasoning.encrypted` blob at any price. Hence
+the dial defaults to `off` — set `AGENT_REASONING=low|medium|high` or a raw
+token budget to buy more.
 
 **Pause and steering.** `pause_gate` (shared by both brains) is the per-step control point: it raises `TaskCancelled` on cancel, and if `pause_requested` is set it sets `task.paused = True`, logs a `paused` event, and sleeps in 0.25 s ticks until the flag clears — still honoring cancel while frozen. `_drain_guidance` runs right after the gate: any queued operator messages are logged as `guidance` events and appended to `contents` as a single `role="user"` turn prefixed *"Operator guidance (incorporate into your next actions):"* — to the model it reads as fresh instruction between the last tool result and its next decision. Gate-then-drain ordering means guidance typed while paused is injected the moment you resume, before the next model call. `_trim_screenshots` never touches these turns (it only elides image blobs), so steering survives history trimming.
 

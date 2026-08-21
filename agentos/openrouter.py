@@ -135,6 +135,28 @@ UI_TOOLS = [
      }}},
 ]
 
+#: Every UI action carries one line of rationale. Reasoning tokens are not a
+#: dependable substitute: gemini-3.7-flash returns most of its thinking as an
+#: opaque `reasoning.encrypted` blob and only sometimes as readable text
+#: (measured 2026-08-21: 0 of 4 turns at effort=medium, 1 of 4 at high), so a
+#: feed that relied on them would show bare coordinates for most of a run. This
+#: is a required argument instead — always present, ~10 tokens, and it makes the
+#: activity feed narrate itself: "click_at — accept the AWS Builder ID terms".
+_INTENT = {"type": "string", "description":
+           "One short line, for the human watching: what you are trying to "
+           "accomplish with this action and why now."}
+
+
+def _with_intent(tool: dict) -> dict:
+    params = tool["parameters"]
+    properties = {**params.get("properties", {}), "intent": _INTENT}
+    required = [*params.get("required", []), "intent"]
+    return {**tool, "parameters": {**params, "properties": properties,
+                                   "required": required}}
+
+
+UI_TOOLS = [_with_intent(t) for t in UI_TOOLS]
+
 
 @dataclass
 class Config:
@@ -146,6 +168,11 @@ class Config:
     system_instruction: str | None = None
     tools: list[dict] = field(default_factory=list)
     timeout_ms: int = 180_000
+    #: OpenRouter's `reasoning` request field, or None to leave it off. When set,
+    #: the model returns its chain of thought in `message.reasoning`, which the
+    #: brain logs so the operator can see WHY it did what it did. Reasoning
+    #: tokens bill as output, hence the effort knob rather than a hard-coded on.
+    reasoning: dict | None = None
 
 
 class OpenRouterError(RuntimeError):
@@ -208,6 +235,11 @@ def _to_messages(contents: list[types.Content], system: str | None) -> list[dict
         parts = content.parts or []
 
         if content.role == "model":
+            # Thought parts are for the operator's feed, not for the wire: this
+            # API wants reasoning echoed back as `reasoning_details`, not as
+            # assistant content, and pasting it into `content` would both inflate
+            # the prompt and read to the model as something it said out loud.
+            parts = [p for p in parts if not p.thought]
             text = "".join(p.text or "" for p in parts if p.text)
             calls = [p.function_call for p in parts if p.function_call]
             message: dict = {"role": "assistant", "content": text or None}
@@ -273,6 +305,22 @@ def _to_content(message: dict) -> types.Content | None:
     brain's empty-response recovery instead of being mistaken for a final answer.
     """
     parts: list[types.Part] = []
+    # Reasoning first, flagged `thought=True` so everything downstream can tell
+    # the model's thinking apart from what it is actually saying. It carries no
+    # thought_signature (that is a Gemini-native concept), which is also how
+    # `GeminiBrain._strip_reasoning` knows this part is display-only and must
+    # not be replayed to the model.
+    reasoning = message.get("reasoning")
+    if not reasoning:
+        # Some providers only populate the structured form. Skip
+        # `reasoning.encrypted` entries: they carry a `data` blob meant for
+        # replay to the provider, not text a human can read.
+        reasoning = "".join(
+            d.get("text") or d.get("summary") or ""
+            for d in (message.get("reasoning_details") or [])
+            if isinstance(d, dict) and d.get("type") != "reasoning.encrypted")
+    if reasoning and reasoning.strip():
+        parts.append(types.Part(text=reasoning.strip(), thought=True))
     text = message.get("content")
     if isinstance(text, list):  # some providers return content as chunks
         text = "".join(c.get("text", "") for c in text if isinstance(c, dict))
@@ -335,6 +383,8 @@ class OpenRouterClient:
             "tool_choice": "auto",
             "usage": {"include": True},   # ask for the token accounting we log
         }
+        if config.reasoning:
+            body["reasoning"] = config.reasoning
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
