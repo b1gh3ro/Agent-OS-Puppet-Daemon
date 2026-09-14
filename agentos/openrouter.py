@@ -28,12 +28,22 @@ from google.genai import types
 
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
-#: Vision + function calling + a large context are all required; every id here
-#: has them. 3.7-flash leads on price (~$0.38/$1.88 per Mtok vs 3.5-flash's
-#: $1.50/$9.00). Override with AGENT_MODEL to use any other OpenRouter id.
+#: Vision + function calling + a large context are all required, and so is
+#: click grounding — the ability to put a 0-1000 coordinate on a named element
+#: in a 1280x800 screenshot. Prices (interactive, per Mtok in/out, 2026-09):
+#: gemma-4-31b $0.09/$0.34, 3.5-flash-lite $0.30/$2.50, 3.7-flash $0.75/$3.75.
+#: gemma-4-31b leads: of 23 cheap vision models tried it was one of six to
+#: ground 5/5 targets, and on a verifiable form-fill task it took the most
+#: direct path (5 calls, 31k prompt tokens, ~$0.003) — about 20x cheaper per
+#: task than 3.7-flash (10 calls, 79k, ~$0.06) — and on a wait-for-event task it
+#: chose wait_for_screen_change unprompted. Cheaper models fail grounding
+#: outright (gpt-5-nano, qwen3.7-flash, glm-5.3-flash) or flail on multi-step
+#: work (ling-3.0-flash-vl), so price alone does not qualify an entry here.
+#: Override with AGENT_MODEL to use any other OpenRouter id.
 MODEL_CANDIDATES = [
+    "google/gemma-4-31b-it",
+    "google/gemini-3.5-flash-lite",
     "google/gemini-3.7-flash",
-    "google/gemini-3.5-flash",
 ]
 
 #: A tool result is JSON *text* on this API — an image cannot ride inside one

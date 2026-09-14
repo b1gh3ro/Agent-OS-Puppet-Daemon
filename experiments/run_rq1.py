@@ -165,7 +165,8 @@ async def main() -> None:
     arms = [x for x in a.arms.split(",") if x]
     brains = {}
     for arm in arms:
-        b = GeminiBrain(waiting_tools=arm_tools[arm])
+        # No polling nudge: the arms measure what the model does unprompted.
+        b = GeminiBrain(waiting_tools=arm_tools[arm], nudge_polling=False)
         # Enforce the control: drop shell / app-launch / handoff so the only way
         # to wait is the visual channel + the arm's primitive.
         b._tools = [t for t in b._tools if t["name"] not in _NON_WAITING_CUSTOM_TOOLS]

@@ -367,6 +367,16 @@ BLOCK_PAUSE_THRESHOLD = 4
 # not spin the remaining budget writing summaries either.
 TEXT_ONLY_LIMIT = int(os.getenv("AGENT_TEXT_ONLY_LIMIT", "3"))
 
+# After this many consecutive steps of bare `wait` polling, remind the model
+# that a blocking primitive exists. Polling is the single largest avoidable
+# spend in the deployment logs: 3,786 of 12,332 model calls were `wait`, each a
+# full screenshot round-trip that changed nothing (one run spent 2,814 of its
+# 5,558 calls this way). The reminder is advisory — the model may keep polling
+# if it has a reason to — and names only the primitives actually exposed. It is
+# a production nudge: experiments pass nudge_polling=False so the arms stay
+# unbiased. 0 disables it.
+WAIT_NUDGE_AFTER = int(os.getenv("AGENT_WAIT_NUDGE_AFTER", "3"))
+
 #: OpenRouter's reasoning-budget dial, off by default. This does NOT gate whether
 #: the operator sees the model's thinking — it only buys more of it.
 #:
@@ -547,9 +557,13 @@ class GeminiBrain:
     #: Waiting primitives, keyed by strategy name. Experiments expose exactly one
     #: of these at a time (see `waiting_tools`); production exposes all three.
     WAITING_TOOLS = ("sleep", "wait_for_screen_change")
+    #: Class-level default so a brain built without __init__ (tests) still has it.
+    _nudge_polling = WAIT_NUDGE_AFTER > 0
+    _waiting_tools: tuple[str, ...] | None = None
 
     def __init__(self, model: str | None = None,
-                 waiting_tools: tuple[str, ...] | None = None):
+                 waiting_tools: tuple[str, ...] | None = None,
+                 nudge_polling: bool = True):
         """`waiting_tools` selects which waiting primitives the model may see.
 
         None (default) is production: expose every primitive, described in the
@@ -579,6 +593,7 @@ class GeminiBrain:
             if unknown:
                 raise ValueError(f"unknown waiting tools: {sorted(unknown)}")
         self._waiting_tools = waiting_tools
+        self._nudge_polling = nudge_polling and WAIT_NUDGE_AFTER > 0
         self._tools = [
             t if waiting_tools is None or t["name"] not in _NEUTRAL_TOOL_DESCRIPTION
             else {**t, "description": _NEUTRAL_TOOL_DESCRIPTION[t["name"]]}
@@ -1041,10 +1056,32 @@ class GeminiBrain:
             # operator can continue the task from where it stopped.
             task.history = contents
 
+    def _polling_nudge(self) -> str | None:
+        """The reminder appended after a run of bare `wait` calls, or None if
+        no blocking primitive is exposed (nothing to recommend)."""
+        exposed = (self.WAITING_TOOLS if self._waiting_tools is None
+                   else self._waiting_tools)
+        options = []
+        if "wait_for_screen_change" in exposed:
+            options.append("call wait_for_screen_change(timeout_seconds=...) once — "
+                           "it blocks until the screen actually changes and returns "
+                           "the moment it does, with no round-trips while waiting")
+        if "sleep" in exposed:
+            options.append("call sleep(seconds=...) once for a known duration")
+        if not options:
+            return None
+        return ("You have polled with wait() several turns in a row. Each wait is "
+                "a full screenshot round-trip that costs the same as an action. If "
+                "you are waiting for something on screen to change, "
+                + "; if you are waiting a fixed time, ".join(options)
+                + ". Keep using wait() only if you genuinely need to re-check "
+                "every few seconds.")
+
     async def _loop(self, task: Task, sandbox: Sandbox, log: RunLog,
                     contents: list[types.Content]) -> str:
         blocked_streak = 0
         text_only_streak = 0
+        wait_streak = 0
         finish_challenged = False
         for step in range(1, task.max_steps + 1):
             await pause_gate(task, log, step)
@@ -1240,6 +1277,18 @@ class GeminiBrain:
                 log.event(step, "screenshot", path=log.save_screenshot(step, png))
                 response_parts[-1].function_response.parts = [types.FunctionResponsePart(
                     inline_data=types.FunctionResponseBlob(mime_type="image/png", data=png))]
+
+            # A step that did nothing but poll extends the streak; any real
+            # action (or a blocking wait) resets it.
+            if all(c.name in ("wait", "wait_5_seconds") for c in calls):
+                wait_streak += 1
+            else:
+                wait_streak = 0
+            if (self._nudge_polling and wait_streak >= WAIT_NUDGE_AFTER
+                    and (nudge := self._polling_nudge())):
+                log.event(step, "wait_nudged", streak=wait_streak)
+                response_parts.append(types.Part(text=nudge))
+                wait_streak = 0  # say it once per run of polls, not every step after
 
             remaining = task.max_steps - step
             response_parts.append(types.Part(text=(
@@ -1599,8 +1648,10 @@ class OpenRouterBrain(GeminiBrain):
     """
 
     def __init__(self, model: str | None = None,
-                 waiting_tools: tuple[str, ...] | None = None):
-        super().__init__(model=model, waiting_tools=waiting_tools)
+                 waiting_tools: tuple[str, ...] | None = None,
+                 nudge_polling: bool = True):
+        super().__init__(model=model, waiting_tools=waiting_tools,
+                         nudge_polling=nudge_polling)
         # MODEL_CALLS_PER_MINUTE defaults to 5 because that is the Gemini free
         # tier's quota. An OpenRouter key is paid and has no such per-minute
         # cap, so pacing is off unless AGENT_MAX_RPM explicitly asks for it —
