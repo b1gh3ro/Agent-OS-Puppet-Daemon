@@ -33,6 +33,35 @@ MODEL_CANDIDATES = [
     "gemini-2.5-computer-use-preview-10-2025",
 ]
 
+#: Environment variable each transport authenticates with. "" means none.
+PROVIDER_KEYS = {"gemini": "GEMINI_API_KEY", "openrouter": "OPENROUTER_API_KEY",
+                 "stub": ""}
+
+#: The shortlist the dashboard's model picker offers, in menu order. `provider`
+#: chooses the transport (and so the API key); `note` is the one-line reason to
+#: pick it. Curated, not exhaustive: AGENT_MODEL and the picker's own
+#: provider+id form still accept any id the provider knows.
+MODEL_CATALOG = [
+    {"id": "gemini-3.5-flash", "provider": "gemini",
+     "label": "Gemini 3.5 Flash",
+     "note": "default: computer-use is a server-side built-in here"},
+    {"id": "gemini-2.5-computer-use-preview-10-2025", "provider": "gemini",
+     "label": "Gemini 2.5 computer-use",
+     "note": "the purpose-trained preview model; slower, sometimes steadier"},
+    {"id": "google/gemma-4-31b-it", "provider": "openrouter",
+     "label": "Gemma 4 31B",
+     "note": "cheapest that still grounds clicks: ~$0.003/task, ~20x under 3.7 Flash"},
+    {"id": "google/gemini-3.5-flash-lite", "provider": "openrouter",
+     "label": "Gemini 3.5 Flash Lite (OpenRouter)",
+     "note": "$0.30/$2.50 per Mtok; a step up when Gemma misreads the screen"},
+    {"id": "google/gemini-3.7-flash", "provider": "openrouter",
+     "label": "Gemini 3.7 Flash (OpenRouter)",
+     "note": "$0.75/$3.75 per Mtok; strongest of the three, ~20x the cost"},
+    {"id": "stub", "provider": "stub",
+     "label": "Stub (no API calls)",
+     "note": "screenshots only — smoke-test the queue and sandbox for free"},
+]
+
 MAX_SCREENSHOTS_IN_HISTORY = 3
 
 #: Hard ceiling on a single model round-trip. Thinking + a 1280x800 screenshot
@@ -535,6 +564,9 @@ async def await_operator(task: Task, log: RunLog, step: int,
 class StubBrain:
     """Screenshot-only brain for smoke-testing the daemon without an API key."""
 
+    #: What the model picker calls this brain; there is no model behind it.
+    model = "stub"
+
     def __init__(self, steps: int = 3):
         self.steps = steps
 
@@ -613,6 +645,13 @@ class GeminiBrain:
     def _default_models() -> list[str]:
         """Fallback chain when no explicit model is given; provider-specific."""
         return MODEL_CANDIDATES
+
+    @property
+    def model(self) -> str:
+        """The model this brain is talking to right now — the head of the
+        fallback chain, which `_generate` collapses to a single entry as soon as
+        one candidate answers. Read by the daemon to report the live selection."""
+        return self._models[0] if self._models else ""
 
     def _waiting_hint(self) -> str:
         """The SYSTEM_HINT paragraphs describing the exposed waiting primitives."""

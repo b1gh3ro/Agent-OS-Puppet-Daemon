@@ -22,7 +22,8 @@ from aiohttp import web
 from dotenv import load_dotenv
 from google.genai import types
 
-from .brain import GeminiBrain, OpenRouterBrain, StubBrain
+from .brain import (MODEL_CATALOG, PROVIDER_KEYS, GeminiBrain,
+                    OpenRouterBrain, StubBrain)
 from .logs import RunLog
 from .models import Task, TaskCancelled, TaskStatus
 from .sandbox import DockerSandbox, Sandbox, ensure_container
@@ -41,6 +42,10 @@ class Daemon:
                  runs_root: str | Path = "runs", token: str = "",
                  novnc_port: int = 6080):
         self.brain = brain
+        # Every brain built this session, keyed "<provider>:<model>", so the
+        # picker can flip back to one without rebuilding its client (and so
+        # shutdown can close every transport it opened, not just the last one).
+        self._brains: dict[str, object] = {self._brain_key(brain): brain}
         self.sandbox = sandbox
         self.workers = workers
         self.runs_root = Path(runs_root)
@@ -57,6 +62,89 @@ class Daemon:
             self._session = aiohttp.ClientSession()
         return self._session
 
+    # -- model selection -----------------------------------------------------
+
+    @staticmethod
+    def _provider_of(brain) -> str:
+        """Which transport a brain instance speaks. OpenRouterBrain subclasses
+        GeminiBrain, so it has to be tested first."""
+        if isinstance(brain, OpenRouterBrain):
+            return "openrouter"
+        if isinstance(brain, GeminiBrain):
+            return "gemini"
+        return "stub"
+
+    @classmethod
+    def _brain_key(cls, brain) -> str:
+        return f"{cls._provider_of(brain)}:{getattr(brain, 'model', '')}"
+
+    def current_model(self) -> dict:
+        return {"provider": self._provider_of(self.brain),
+                "id": getattr(self.brain, "model", ""),
+                "brain": type(self.brain).__name__}
+
+    def models_payload(self) -> dict:
+        """The picker's menu: the catalog, each entry marked with whether its
+        key is present and which one is live. A model selected by AGENT_MODEL
+        but absent from the catalog is appended, so the running choice is always
+        in the list."""
+        current = self.current_model()
+        entries = []
+        for spec in MODEL_CATALOG:
+            key = PROVIDER_KEYS.get(spec["provider"], "")
+            entries.append({**spec,
+                            "available": not key or bool(os.getenv(key)),
+                            "requires": key,
+                            "current": (spec["provider"] == current["provider"]
+                                        and spec["id"] == current["id"])})
+        if not any(e["current"] for e in entries) and current["id"]:
+            entries.append({"id": current["id"], "provider": current["provider"],
+                            "label": current["id"], "note": "set with AGENT_MODEL",
+                            "available": True,
+                            "requires": PROVIDER_KEYS.get(current["provider"], ""),
+                            "current": True})
+        return {"current": current, "models": entries}
+
+    def select_model(self, model_id: str, provider: str = "") -> dict:
+        """Switch the brain new tasks will run on.
+
+        A task already in flight keeps the brain it started with — swapping the
+        model under a half-finished conversation would hand a new model someone
+        else's history mid-action. Queued tasks pick up the new one, since a
+        worker reads self.brain when it dequeues.
+        """
+        model_id = (model_id or "").strip()
+        if not model_id:
+            raise web.HTTPBadRequest(text='"id" is required')
+        if not provider:
+            match = next((m for m in MODEL_CATALOG if m["id"] == model_id), None)
+            if not match:
+                raise web.HTTPBadRequest(
+                    text=f"unknown model {model_id!r}; pass \"provider\" too to use "
+                         f"an id outside the catalog")
+            provider = match["provider"]
+        if provider not in PROVIDER_KEYS:
+            raise web.HTTPBadRequest(text=f"unknown provider {provider!r}")
+        env_key = PROVIDER_KEYS[provider]
+        if env_key and not os.getenv(env_key):
+            raise web.HTTPBadRequest(
+                text=f"{env_key} is not set, so {provider} is unavailable")
+
+        key = f"{provider}:{model_id}"
+        cached = self._brains.get(key)
+        if cached is None:
+            try:
+                cached = build_brain(provider, None if provider == "stub" else model_id)
+            except Exception as e:  # a bad key or a missing SDK shows up here
+                raise web.HTTPBadGateway(text=f"could not start {provider}: {e}")
+            # Keyed by what was *asked for*, which is what the next lookup will
+            # ask for again; a brain's own reported model can differ (the startup
+            # brain carries a fallback chain until its first successful call).
+            self._brains[key] = cached
+        self.brain = cached
+        log.info("model switched to %s (%s)", model_id, type(cached).__name__)
+        return self.models_payload()
+
     # -- worker loop ---------------------------------------------------------
 
     async def worker(self, n: int) -> None:
@@ -68,10 +156,15 @@ class Daemon:
                 continue
             task.status = TaskStatus.RUNNING
             run_log = RunLog(task.id, root=self.runs_root, base=task.prior_steps)
-            run_log.event(0, "start", goal=task.goal, worker=n)
+            # Pin the brain for this task's lifetime: the picker may swap
+            # self.brain mid-run, and a conversation must not change models
+            # halfway. The log records which one actually ran.
+            brain = self.brain
+            run_log.event(0, "start", goal=task.goal, worker=n,
+                          model=getattr(brain, "model", ""))
             log.info("worker %d: task %s started: %s", n, task.id, task.goal)
             try:
-                task.result = await self._run_with_deadline(task, run_log)
+                task.result = await self._run_with_deadline(task, run_log, brain)
                 task.status = TaskStatus.DONE
             except TaskCancelled:
                 task.status = TaskStatus.CANCELLED
@@ -91,7 +184,8 @@ class Daemon:
                 self._persist_task(task)
                 log.info("task %s finished: %s", task.id, task.status.value)
 
-    async def _run_with_deadline(self, task: Task, run_log: RunLog) -> str | None:
+    async def _run_with_deadline(self, task: Task, run_log: RunLog,
+                                 brain=None) -> str | None:
         """Run the brain against a *mutable* wall-clock deadline.
 
         asyncio.wait_for freezes its timeout at call time, so a long sleep
@@ -100,7 +194,8 @@ class Daemon:
         against it, cancelling only once the current deadline actually passes.
         """
         task.deadline = time.monotonic() + task.timeout_seconds
-        runner = asyncio.ensure_future(self.brain.run_task(task, self.sandbox, run_log))
+        brain = brain or self.brain
+        runner = asyncio.ensure_future(brain.run_task(task, self.sandbox, run_log))
         try:
             while True:
                 remaining = task.deadline - time.monotonic()
@@ -408,6 +503,19 @@ class Daemon:
         log.info("task %s instructions updated (%d chars)", task.id, len(task.instructions))
         return web.json_response(task.to_dict())
 
+    async def get_models(self, request: web.Request) -> web.Response:
+        return web.json_response(self.models_payload())
+
+    async def post_model(self, request: web.Request) -> web.Response:
+        """Switch models from the dashboard. Body: {"id": ..., "provider": ...},
+        where provider is optional for a catalog id."""
+        try:
+            body = await request.json()
+        except Exception:
+            raise web.HTTPBadRequest(text="body must be JSON")
+        return web.json_response(
+            self.select_model(body.get("id") or "", (body.get("provider") or "").strip()))
+
     async def experiment(self, request: web.Request) -> web.Response:
         """A live, auto-refreshing view of the RQ1 batch: progress, the run in
         flight, and per-arm averages so far. Read-only; reads the driver's
@@ -499,6 +607,7 @@ class Daemon:
             "queued": self.queue.qsize(),
             "tasks": len(self.tasks),
             "brain": type(self.brain).__name__,
+            "model": self.current_model()["id"],
         })
 
     def build_app(self) -> web.Application:
@@ -520,6 +629,8 @@ class Daemon:
         app.router.add_get("/desktop/websockify", self.desktop_ws)
         app.router.add_get("/desktop", self.desktop_root)
         app.router.add_get("/desktop/{tail:.*}", self.desktop_http)
+        app.router.add_get("/models", self.get_models)
+        app.router.add_post("/models", self.post_model)
         app.router.add_get("/experiment", self.experiment)
         app.router.add_get("/health", self.health)
         app.router.add_get("/", self.index)
@@ -537,39 +648,51 @@ class Daemon:
                 await asyncio.wait(app["workers"], timeout=WORKER_SHUTDOWN_GRACE)
             if self._session and not self._session.closed:
                 await self._session.close()
-            # The OpenRouter transport holds its own HTTP session.
-            if hasattr(self.brain, "aclose"):
-                await self.brain.aclose()
+            # The OpenRouter transport holds its own HTTP session — and the
+            # picker may have opened several over the session's life.
+            for brain in self._brains.values():
+                if hasattr(brain, "aclose"):
+                    await brain.aclose()
 
         app.on_startup.append(start_workers)
         app.on_cleanup.append(stop_workers)
         return app
 
 
+def build_brain(provider: str, model: str | None):
+    """Construct one brain for an already-resolved provider/model pair.
+
+    The single place a brain is built, so the startup flag and the dashboard's
+    model picker cannot drift apart in how they configure one. Expose BOTH
+    waiting primitives with neutral, matched-length wording so the model picks
+    sleep vs wait_for_screen_change on the task's merits, not because the prompt
+    or tool text steers it. (The biased production wording remains available via
+    waiting_tools=None for the deliberate A/B, but the live daemon runs
+    unbiased.)"""
+    if provider == "stub":
+        return StubBrain(steps=int(os.getenv("AGENT_STUB_STEPS", "3")))
+    cls = OpenRouterBrain if provider == "openrouter" else GeminiBrain
+    return cls(model=model or None, waiting_tools=cls.WAITING_TOOLS)
+
+
 def make_brain(kind: str):
-    """Pick a transport. `auto` prefers OpenRouter when its key is present:
-    that is the deliberate opt-in, since a project with both keys set has just
-    added the OpenRouter one."""
-    stub_steps = int(os.getenv("AGENT_STUB_STEPS", "3"))
+    """Pick the transport to start on. `auto` prefers OpenRouter when its key is
+    present: that is the deliberate opt-in, since a project with both keys set
+    has just added the OpenRouter one. Whatever this returns is only the initial
+    choice — POST /models moves it afterwards."""
+    model = os.getenv("AGENT_MODEL") or None
     if kind == "stub":
-        return StubBrain(steps=stub_steps)
+        return build_brain("stub", None)
     if kind == "openrouter" or (kind == "auto" and os.getenv("OPENROUTER_API_KEY")):
         if not os.getenv("OPENROUTER_API_KEY"):
             log.warning("OPENROUTER_API_KEY not set — falling back to stub brain")
-            return StubBrain(steps=stub_steps)
-        return OpenRouterBrain(model=os.getenv("AGENT_MODEL") or None,
-                               waiting_tools=OpenRouterBrain.WAITING_TOOLS)
+            return build_brain("stub", None)
+        return build_brain("openrouter", model)
     if not os.getenv("GEMINI_API_KEY"):
         log.warning("neither OPENROUTER_API_KEY nor GEMINI_API_KEY set — "
                     "falling back to stub brain")
-        return StubBrain(steps=stub_steps)
-    # Expose BOTH waiting primitives with neutral, matched-length wording so the
-    # model picks sleep vs wait_for_screen_change on the task's merits, not
-    # because the prompt or tool text steers it. (The biased production wording
-    # remains available via waiting_tools=None for the deliberate A/B, but the
-    # live daemon runs unbiased.)
-    return GeminiBrain(model=os.getenv("AGENT_MODEL") or None,
-                       waiting_tools=GeminiBrain.WAITING_TOOLS)
+        return build_brain("stub", None)
+    return build_brain("gemini", model)
 
 
 async def main() -> None:

@@ -25,8 +25,11 @@ GEMINI_API_KEY=paste-your-key-here
 ```
 
 If both are set, OpenRouter wins; force either with `--brain openrouter` /
-`--brain gemini`. Pick the model with `AGENT_MODEL` (default on OpenRouter:
-`google/gemini-3.7-flash`).
+`--brain gemini`. Pick the starting model with `AGENT_MODEL` (default on
+OpenRouter: `google/gemma-4-31b-it`) — or just use the **model picker in the
+dashboard header**, which switches models without restarting the daemon. A
+switch applies to the next task to start; anything already running finishes on
+the model it began with.
 
 > On OpenRouter the agent drives the desktop with hand-declared click/type
 > tools, because no computer-use model is available there. It works, but it is

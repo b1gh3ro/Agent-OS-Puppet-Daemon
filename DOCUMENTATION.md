@@ -59,9 +59,19 @@ API, exposes no such built-in, and lists no computer-use model — so
 tools and lets a general vision model drive them. Everything downstream of the
 model call — history repair, elision, retries, action dispatch — is shared.
 
-Choose explicitly with `--brain gemini|openrouter|stub|auto`, and pick the model
-with `AGENT_MODEL` (an OpenRouter id such as `anthropic/claude-sonnet-5` when
-running through OpenRouter). Request pacing (`AGENT_MAX_RPM`) defaults to 5/min
+Choose explicitly with `--brain gemini|openrouter|stub|auto`, and pick the
+starting model with `AGENT_MODEL` (an OpenRouter id such as
+`anthropic/claude-sonnet-5` when running through OpenRouter). Neither is a
+one-way door: the dashboard's model picker (header, top right) moves the daemon
+between models — and between transports — while it runs, over `POST /models`.
+The menu is `MODEL_CATALOG` in `brain.py`, a curated shortlist annotated with
+what each model costs and is good for; entries whose provider key is missing
+from `.env` are shown but disabled, so the menu explains the gap instead of
+hiding it. Switching builds that brain once and caches it, so flipping back and
+forth costs nothing, and a switch binds at task start: a worker pins the brain
+it dequeued with and logs it in the run's `start` event, so a model never
+inherits another model's half-finished conversation mid-action. Request pacing
+(`AGENT_MAX_RPM`) defaults to 5/min
 on Gemini to respect the free tier's quota, and to unpaced on OpenRouter.
 `AGENT_REASONING` (default `off`) buys extra visible reasoning on OpenRouter —
 see *Seeing why, not just what*.
@@ -114,7 +124,9 @@ curl -X POST localhost:8420/tasks -H 'Content-Type: application/json' \
 | `GET /tasks/<id>/steps?after=N` | The run's step events as JSON (parsed from `steps.jsonl`), skipping the first `N` lines. Returns `{"events": [...], "next": M}` — pass `M` back as `after` to poll incrementally. |
 | `GET /runs/<id>/step_NNN.png` | A run's screenshots (whitelisted filenames only). |
 | `GET /` | The dashboard (single static page, no build step). |
-| `GET /health` | Queue depth, task count, which brain is loaded. |
+| `GET /health` | Queue depth, task count, which brain and model are loaded. |
+| `GET /models` | The model picker's menu: every catalog entry with `available` (is its key set?), `requires` (which key), and which one is `current`. |
+| `POST /models` | Body: `{"id": "...", "provider": "..."}` — switch the model new tasks run on. `provider` is optional for a catalog id, required for any other id the provider knows. 400 if the id is unknown or its key is unset. |
 
 **Pause semantics worth knowing:** pause is cooperative — it takes effect at the next step boundary, never mid-action or mid-model-call, and `paused` in `GET /tasks/<id>` tells you when the freeze has actually happened (vs `pause_requested`, which is just your intent). The wall-clock `timeout_seconds` keeps ticking while paused (see §6). Cancelling a paused task works. Guidance sent while the model call is already in flight lands on the step after.
 
